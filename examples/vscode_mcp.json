@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "grafeo": {
+      "command": "grafeo-mcp",
+      "env": {
+        "GRAFEO_DB_PATH": "${workspaceFolder}/graph.db"
+      }
+    }
+  }
+}
