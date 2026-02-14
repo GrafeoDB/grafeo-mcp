@@ -5,28 +5,28 @@
 
 # grafeo-mcp
 
-MCP server that exposes [GrafeoDB](https://grafeo.dev/) — an embedded graph database — to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/).
+MCP server that exposes [GrafeoDB](https://grafeo.dev/) - an embedded graph database - to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/).
 
 One install, zero infrastructure. The MCP server *is* the database.
 
 ## Features
 
-- **16 tools** — graph CRUD, GQL queries, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain, and more
-- **3 resources** — `graph://schema`, `graph://stats`, `graph://nodes/{id}`
-- **4 workflow prompts** — guide agents through exploration, knowledge extraction, graph analysis, and similarity search
-- **GQL with Cypher auto-normalization** — agents trained on Cypher syntax work out of the box
-- **Schema-first** — agents discover the graph structure before querying
-- **Token-aware** — all tools have `limit` params and truncate large results
-- **Embedded** — no separate database server to manage
+- **16 tools** - graph CRUD, GQL queries, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
+- **3 resources** - `graph://schema`, `graph://stats`, `graph://nodes/{id}`
+- **4 workflow prompts** - guide agents through exploration, knowledge extraction, graph analysis and similarity search
+- **GQL with Cypher auto-normalization** - agents trained on Cypher syntax work out of the box
+- **Schema-first** - agents discover the graph structure before querying
+- **Token-aware** - all tools have `limit` params and truncate large results
+- **Embedded** - no separate database server to manage
 
 ## Quickstart
 
 ```bash
 # Install
-pip install grafeo-mcp
-
-# Or with uv
 uv tool install grafeo-mcp
+
+# Or with pip
+pip install grafeo-mcp
 ```
 
 ### Claude Desktop
