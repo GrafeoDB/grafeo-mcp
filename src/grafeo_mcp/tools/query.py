@@ -18,8 +18,6 @@ _MAX_RESULT_ROWS = 100  # default cap before truncation
 # differences are handled; anything deeper needs a real parser.
 _CYPHER_TO_GQL = [
     (re.compile(r"\bCREATE\b", re.IGNORECASE), "INSERT"),
-    (re.compile(r"\bMERGE\b", re.IGNORECASE), "MERGE"),  # same in GQL
-    (re.compile(r"\bDETACH\s+DELETE\b", re.IGNORECASE), "DETACH DELETE"),
 ]
 
 
