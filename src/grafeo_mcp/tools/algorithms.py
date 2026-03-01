@@ -1,41 +1,12 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext, mcp
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_MAX_RESULT_CHARS = 8_000
-
-
-def _truncate(payload: Any, *, limit: int = _MAX_RESULT_CHARS) -> str:
-    """Serialise *payload* to compact JSON, truncating if it exceeds *limit*."""
-    text = json.dumps(payload, default=str, separators=(",", ":"))
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n... (truncated — {len(text)} chars total)"
-
-
-def _node_summary(db: Any, node_id: int) -> dict[str, Any]:
-    """Lightweight node dict (id + labels + properties, no large vectors)."""
-    node = db.get_node(node_id)
-    if node is None:
-        return {"node_id": node_id, "error": "node not found"}
-    props = node.properties()
-    props = {k: v for k, v in props.items() if not (isinstance(v, list) and len(v) > 32)}
-    return {"node_id": node_id, "labels": node.labels, "properties": props}
-
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
+from grafeo_mcp.tools._helpers import _node_summary, _truncate
 
 
 @mcp.tool()

@@ -6,21 +6,8 @@ import grafeo
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
+from grafeo_mcp.resources._helpers import _format_value
 from grafeo_mcp.server import AppContext, mcp
-
-
-def _format_value(v: object) -> str:
-    """Format a property value for display, truncating long strings and vectors."""
-    if isinstance(v, str):
-        if len(v) > 80:
-            return f'"{v[:77]}..."'
-        return f'"{v}"'
-    if isinstance(v, list):
-        if len(v) > 8:
-            preview = ", ".join(str(x) for x in v[:4])
-            return f"[{preview}, ...] ({len(v)} items)"
-        return str(v)
-    return str(v)
 
 
 def _build_connection_summary(db: grafeo.GrafeoDB, node_id: int) -> str:
@@ -29,19 +16,23 @@ def _build_connection_summary(db: grafeo.GrafeoDB, node_id: int) -> str:
 
     # Outgoing edges
     out_types: Counter[str] = Counter()
+    out_row_count = 0
     try:
         result = db.execute(f"MATCH (n)-[r]->(m) WHERE id(n) = {node_id} RETURN type(r), id(m) LIMIT 100")
         for row in result:
             out_types[str(row[0])] += 1
+            out_row_count += 1
     except Exception:
         pass
 
     # Incoming edges
     in_types: Counter[str] = Counter()
+    in_row_count = 0
     try:
         result = db.execute(f"MATCH (m)-[r]->(n) WHERE id(n) = {node_id} RETURN type(r), id(m) LIMIT 100")
         for row in result:
             in_types[str(row[0])] += 1
+            in_row_count += 1
     except Exception:
         pass
 
@@ -53,11 +44,17 @@ def _build_connection_summary(db: grafeo.GrafeoDB, node_id: int) -> str:
 
     if out_types:
         out_items = ", ".join(f"{t} ({c})" for t, c in out_types.most_common())
-        parts.append(f"  Outgoing: {out_items}")
+        line = f"  Outgoing: {out_items}"
+        if out_row_count >= 100:
+            line += " (showing first 100, node may have more)"
+        parts.append(line)
 
     if in_types:
         in_items = ", ".join(f"{t} ({c})" for t, c in in_types.most_common())
-        parts.append(f"  Incoming: {in_items}")
+        line = f"  Incoming: {in_items}"
+        if in_row_count >= 100:
+            line += " (showing first 100, node may have more)"
+        parts.append(line)
 
     return "\n".join(parts)
 

@@ -4,22 +4,10 @@ import grafeo
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
+from grafeo_mcp.resources._helpers import _format_value
 from grafeo_mcp.server import AppContext, mcp
 
 SAMPLE_LIMIT = 3
-
-
-def _format_value(v: object) -> str:
-    """Format a property value for display, truncating long strings."""
-    if isinstance(v, str):
-        if len(v) > 60:
-            return f'"{v[:57]}..."'
-        return f'"{v}"'
-    if isinstance(v, list):
-        if len(v) > 5:
-            return f"[{', '.join(str(x) for x in v[:5])}, ...] ({len(v)} items)"
-        return str(v)
-    return str(v)
 
 
 def _build_label_details(db: grafeo.GrafeoDB, schema: dict) -> str:
@@ -53,7 +41,7 @@ def _build_label_details(db: grafeo.GrafeoDB, schema: dict) -> str:
 
         if prop_examples:
             for key, val in sorted(prop_examples.items()):
-                lines.append(f"    .{key}: {_format_value(val)}")
+                lines.append(f"    .{key}: {_format_value(val, str_limit=60, list_limit=5, list_preview=5)}")
         else:
             lines.append("    (no properties found)")
 
@@ -119,21 +107,11 @@ def _build_index_details(db: grafeo.GrafeoDB, schema: dict) -> str:
     else:
         lines.append("  (none)")
 
-    # Vector indexes: query info if available
+    # Vector indexes: not enumerable via the current Python API, so direct
+    # agents to the tools that can manage them.
     lines.append("")
     lines.append("Vector indexes:")
-    try:
-        result = db.execute("MATCH (n) WHERE n.embedding IS NOT NULL RETURN labels(n), 'embedding' LIMIT 1")
-        # If the query returns results, there might be vector data, but we can't
-        # enumerate indexes directly. We'll note what we can find from schema.
-        has_vector = False
-        for _row in result:
-            has_vector = True
-            break
-        if not has_vector:
-            lines.append("  (none detected)")
-    except Exception:
-        lines.append("  (none detected)")
+    lines.append("  (use graph_info tool or create_vector_index to manage)")
 
     return "\n".join(lines) + "\n"
 

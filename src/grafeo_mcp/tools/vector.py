@@ -1,49 +1,12 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext, mcp
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_MAX_RESULT_CHARS = 8_000
-"""Soft ceiling for serialised tool output.  When a JSON result exceeds this
-length the helper below truncates it so the LLM context window is not wasted
-on thousands of identical embedding rows."""
-
-
-def _truncate(payload: Any, *, limit: int = _MAX_RESULT_CHARS) -> str:
-    """Serialise *payload* to compact JSON, truncating if it exceeds *limit*.
-
-    Returns a plain string that is safe to hand back to the MCP caller.
-    """
-    text = json.dumps(payload, default=str, separators=(",", ":"))
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n... (truncated — {len(text)} chars total)"
-
-
-def _node_summary(db: Any, node_id: int) -> dict[str, Any]:
-    """Fetch a node and return a lightweight dict (id + labels + properties)."""
-    node = db.get_node(node_id)
-    if node is None:
-        return {"node_id": node_id, "error": "node not found"}
-    props = node.properties()
-    # Drop large vector/embedding properties from the summary so we don't
-    # blow up the output with thousands of floats.
-    props = {k: v for k, v in props.items() if not (isinstance(v, list) and len(v) > 32)}
-    return {"node_id": node_id, "labels": node.labels, "properties": props}
-
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
+from grafeo_mcp.tools._helpers import _node_summary, _truncate
 
 
 @mcp.tool()
@@ -73,7 +36,7 @@ def vector_search(
             of speed.  Leave as None to use the index default.
 
     Returns:
-        JSON array of {node_id, distance, similarity, labels, properties}
+        JSON array of {node_id, distance, labels, properties}
         sorted by distance ascending (most similar first).
 
     Example call:
@@ -89,7 +52,6 @@ def vector_search(
             entry: dict[str, Any] = {
                 "node_id": node_id,
                 "distance": round(float(distance), 6),
-                "similarity": round(1.0 - float(distance), 6),
             }
             summary = _node_summary(db, node_id)
             entry["labels"] = summary.get("labels", [])
@@ -197,7 +159,7 @@ def mmr_search(
         ef: HNSW search beam width. Leave as None for index default.
 
     Returns:
-        JSON array of {node_id, distance, similarity, labels, properties}
+        JSON array of {node_id, distance, labels, properties}
         ordered by MMR selection (not pure distance).
 
     Example call:
@@ -213,7 +175,6 @@ def mmr_search(
             entry: dict[str, Any] = {
                 "node_id": node_id,
                 "distance": round(float(distance), 6),
-                "similarity": round(1.0 - float(distance), 6),
             }
             summary = _node_summary(db, node_id)
             entry["labels"] = summary.get("labels", [])
@@ -282,7 +243,6 @@ def vector_graph_search(
             entry: dict[str, Any] = {
                 "node_id": node_id,
                 "distance": round(float(distance), 6),
-                "similarity": round(1.0 - float(distance), 6),
             }
             summary = _node_summary(db, node_id)
             entry["labels"] = summary.get("labels", [])

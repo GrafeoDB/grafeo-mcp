@@ -11,9 +11,8 @@ import json
 import grafeo
 import pytest
 
+from grafeo_mcp.tools._helpers import _node_summary, _truncate
 from grafeo_mcp.tools.vector import (
-    _node_summary,
-    _truncate,
     create_vector_index,
     vector_graph_search,
     vector_search,
