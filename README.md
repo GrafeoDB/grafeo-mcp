@@ -161,6 +161,10 @@ uv run ruff format .   # Format
 uv run ty check        # Type check
 ```
 
+## See Also
+
+- **[grafeo-memory](https://github.com/GrafeoDB/grafeo-memory)** includes a built-in MCP server (`grafeo-memory-mcp`) that wraps the high-level memory API — extract, reconcile, search, summarize. If you need AI memory management rather than raw graph access, use `uv add grafeo-memory[mcp]`.
+
 ## License
 
 Apache-2.0
