@@ -20,6 +20,16 @@ def test_app_context_holds_db():
     import grafeo
 
     db = grafeo.GrafeoDB()
-    ctx = AppContext(db=db)
+    ctx = AppContext(db=db, read_only=False)
     assert ctx.db is db
+    assert ctx.read_only is False
+    db.close()
+
+
+def test_app_context_read_only():
+    import grafeo
+
+    db = grafeo.GrafeoDB()
+    ctx = AppContext(db=db, read_only=True)
+    assert ctx.read_only is True
     db.close()

@@ -12,11 +12,13 @@ from mcp.server.fastmcp import FastMCP
 @dataclass
 class AppContext:
     db: grafeo.GrafeoDB
+    read_only: bool
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     db_path = os.environ.get("GRAFEO_DB_PATH")
+    read_only = os.environ.get("GRAFEO_READ_ONLY", "").strip() in ("1", "true", "yes")
     if db_path and os.path.exists(db_path):
         db = grafeo.GrafeoDB.open(db_path)
     elif db_path:
@@ -24,7 +26,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     else:
         db = grafeo.GrafeoDB()  # in-memory
     try:
-        yield AppContext(db=db)
+        yield AppContext(db=db, read_only=read_only)
     finally:
         db.close()
 
@@ -37,8 +39,10 @@ import grafeo_mcp.prompts.templates  # noqa: E402
 import grafeo_mcp.resources.nodes  # noqa: E402
 import grafeo_mcp.resources.schema  # noqa: E402
 import grafeo_mcp.tools.algorithms  # noqa: E402
+import grafeo_mcp.tools.batch  # noqa: E402
 import grafeo_mcp.tools.graph  # noqa: E402
 import grafeo_mcp.tools.query  # noqa: E402
+import grafeo_mcp.tools.search  # noqa: E402
 import grafeo_mcp.tools.vector  # noqa: E402, F401
 
 

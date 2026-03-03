@@ -20,6 +20,17 @@ def _truncate(payload: Any, *, limit: int = _MAX_RESULT_CHARS) -> str:
     return text[:limit] + f"\n... (truncated: {len(text)} chars total)"
 
 
+def _read_only_guard(ctx: Any) -> str | None:
+    """Return an error string if the server is in read-only mode, else None."""
+    if ctx.request_context.lifespan_context.read_only:
+        return (
+            "Error: server is in read-only mode (GRAFEO_READ_ONLY=1). "
+            "Mutation tools are disabled. Use read-only tools like "
+            "get_node, search_nodes_by_label, execute_gql, or graph_info."
+        )
+    return None
+
+
 def _node_summary(db: Any, node_id: int) -> dict[str, Any]:
     """Fetch a node and return a lightweight dict (id + labels + properties)."""
     node = db.get_node(node_id)
