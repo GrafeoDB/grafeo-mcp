@@ -6,7 +6,7 @@ from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext, mcp
-from grafeo_mcp.tools._helpers import _node_summary, _truncate
+from grafeo_mcp.tools._helpers import _node_summary, _read_only_guard, _truncate
 
 
 @mcp.tool()
@@ -100,6 +100,8 @@ def create_vector_index(
                             ef_construction=200)
     """
     assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
     try:
         db = ctx.request_context.lifespan_context.db
         db.create_vector_index(

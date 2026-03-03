@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext, mcp
+from grafeo_mcp.tools._helpers import _read_only_guard
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,6 +68,8 @@ def create_node(
         create_node(["Tag"])  # no properties
     """
     assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
     try:
         db = ctx.request_context.lifespan_context.db
         node = db.create_node(labels, properties)
@@ -107,6 +110,8 @@ def create_edge(
         create_edge(1, 3, "WORKS_AT", {"since": 2020})
     """
     assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
     try:
         db = ctx.request_context.lifespan_context.db
         edge = db.create_edge(source_id, target_id, edge_type, properties)
@@ -376,3 +381,193 @@ def get_neighbors(
             "Verify the node exists with get_node, or try graph_info "
             "to inspect the database state."
         )
+
+
+@mcp.tool()
+def update_node(
+    node_id: int,
+    properties: dict[str, Any],
+    merge: bool = True,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Update properties on an existing node.
+
+    Use this tool when: you need to modify a node's properties after creation.
+    Do NOT use for: changing labels (use execute_gql), creating new nodes
+    (use create_node), or deleting nodes (use delete_node).
+
+    Args:
+        node_id: The ID of the node to update.
+        properties: Key-value properties to set. Values can be strings,
+            numbers, booleans, or lists.
+        merge: If True (default), merge with existing properties (new keys
+            are added, existing keys are overwritten, unlisted keys are
+            kept). If False, replace all properties (unlisted keys are
+            removed).
+
+    Returns:
+        JSON with the updated node's id, labels, and properties.
+
+    Examples:
+        update_node(0, {"age": 31})                     # merge: keep other props
+        update_node(0, {"name": "Alice"}, merge=False)  # replace all props
+    """
+    assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
+    try:
+        db = ctx.request_context.lifespan_context.db
+        node = db.get_node(node_id)
+        if node is None:
+            return f"Node {node_id} not found. Use search_nodes_by_label or graph_info to find valid node IDs."
+        if not merge:
+            for key in list(node.properties().keys()):
+                if key not in properties:
+                    db.remove_node_property(node_id, key)
+        for key, value in properties.items():
+            db.set_node_property(node_id, key, value)
+        return json.dumps(_node_to_dict(db.get_node(node_id)), default=str)
+    except Exception as exc:
+        return f"Failed to update node {node_id}: {exc}. Verify the node exists with get_node."
+
+
+@mcp.tool()
+def delete_node(
+    node_id: int,
+    detach: bool = True,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Delete a node from the graph.
+
+    Use this tool when: you need to remove a node permanently.
+    Do NOT use for: updating properties (use update_node) or deleting
+    edges only (use delete_edge).
+
+    Args:
+        node_id: The ID of the node to delete.
+        detach: If True (default), also delete all edges connected to this
+            node (like DETACH DELETE in Cypher). If False, fail if the node
+            has any connected edges.
+
+    Returns:
+        Confirmation message on success, or an error message.
+
+    Examples:
+        delete_node(42)                # detach delete (remove edges too)
+        delete_node(42, detach=False)  # fail if edges exist
+    """
+    assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
+    try:
+        db = ctx.request_context.lifespan_context.db
+        node = db.get_node(node_id)
+        if node is None:
+            return f"Node {node_id} not found. Use search_nodes_by_label or graph_info to find valid node IDs."
+
+        # Check for connected edges
+        edge_query = f"MATCH (n)-[e]-() WHERE id(n) = {node_id} RETURN id(e) AS eid"
+        edge_ids: set[int] = set()
+        for row in db.execute(edge_query):
+            eid = row.get("eid") if isinstance(row, dict) else row[0]
+            edge_ids.add(int(eid))
+
+        if edge_ids and not detach:
+            return (
+                f"Node {node_id} has {len(edge_ids)} connected edge(s). "
+                "Use detach=True to delete the node and its edges, "
+                "or delete the edges first with delete_edge."
+            )
+
+        for eid in edge_ids:
+            db.delete_edge(eid)
+
+        labels_str = ", ".join(node.labels) if node.labels else "(unlabeled)"
+        db.delete_node(node_id)
+        edge_note = f" and {len(edge_ids)} edge(s)" if edge_ids else ""
+        return f"Deleted node {node_id} (:{labels_str}){edge_note}."
+    except Exception as exc:
+        return f"Failed to delete node {node_id}: {exc}. Verify the node exists with get_node."
+
+
+@mcp.tool()
+def update_edge(
+    edge_id: int,
+    properties: dict[str, Any],
+    merge: bool = True,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Update properties on an existing edge.
+
+    Use this tool when: you need to modify an edge's properties after creation.
+    Do NOT use for: changing the edge type (delete and recreate), creating
+    new edges (use create_edge), or deleting edges (use delete_edge).
+
+    Args:
+        edge_id: The ID of the edge to update.
+        properties: Key-value properties to set.
+        merge: If True (default), merge with existing properties. If False,
+            replace all properties.
+
+    Returns:
+        JSON with the updated edge's id, source_id, target_id, edge_type,
+        and properties.
+
+    Examples:
+        update_edge(0, {"weight": 2.5})
+        update_edge(0, {"since": 2024}, merge=False)
+    """
+    assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
+    try:
+        db = ctx.request_context.lifespan_context.db
+        edge = db.get_edge(edge_id)
+        if edge is None:
+            return f"Edge {edge_id} not found. Use get_neighbors or execute_gql to find valid edge IDs."
+        if not merge:
+            for key in list(edge.properties().keys()):
+                if key not in properties:
+                    db.remove_edge_property(edge_id, key)
+        for key, value in properties.items():
+            db.set_edge_property(edge_id, key, value)
+        return json.dumps(_edge_to_dict(db.get_edge(edge_id)), default=str)
+    except Exception as exc:
+        return f"Failed to update edge {edge_id}: {exc}. Verify the edge exists with get_neighbors or execute_gql."
+
+
+@mcp.tool()
+def delete_edge(
+    edge_id: int,
+    ctx: Context[ServerSession, AppContext] | None = None,
+) -> str:
+    """Delete an edge from the graph.
+
+    Use this tool when: you need to remove a relationship between two nodes.
+    Do NOT use for: deleting nodes (use delete_node) or updating edge
+    properties (use update_edge).
+
+    Args:
+        edge_id: The ID of the edge to delete.
+
+    Returns:
+        Confirmation message on success, or an error message.
+
+    Examples:
+        delete_edge(5)
+    """
+    assert ctx is not None
+    if ro := _read_only_guard(ctx):
+        return ro
+    try:
+        db = ctx.request_context.lifespan_context.db
+        edge = db.get_edge(edge_id)
+        if edge is None:
+            return f"Edge {edge_id} not found. Use get_neighbors or execute_gql to find valid edge IDs."
+        edge_type = edge.edge_type
+        source_id = edge.source_id
+        target_id = edge.target_id
+        db.delete_edge(edge_id)
+        return f"Deleted edge {edge_id} (:{edge_type} from node {source_id} to node {target_id})."
+    except Exception as exc:
+        return f"Failed to delete edge {edge_id}: {exc}. Verify the edge exists with get_neighbors or execute_gql."

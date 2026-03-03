@@ -20,6 +20,7 @@ import pytest
 @dataclass
 class _LifespanContext:
     db: Any
+    read_only: bool = False
 
 
 @dataclass

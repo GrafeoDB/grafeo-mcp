@@ -5,6 +5,27 @@ All notable changes to grafeo-mcp are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-03-03
+
+CRUD completion, batch import, full-text search, and read-only mode.
+
+### Added
+
+- **`update_node`**: update node properties with merge or replace semantics
+- **`delete_node`**: delete a node with optional detach (removes connected edges)
+- **`update_edge`**: update edge properties with merge or replace semantics
+- **`delete_edge`**: delete an edge by ID
+- **`batch_import`**: bulk-create nodes and edges from JSON arrays with `@index` cross-references (max 500 nodes, 1000 edges per batch)
+- **`search_text`**: full-text keyword search over string properties (requires text index)
+- **`create_text_index`**: create a full-text search index on a string property
+- **Read-only mode**: set `GRAFEO_READ_ONLY=1` to disable all mutation tools; mutation tools remain visible but return a descriptive error guiding agents to read-only alternatives
+
+### Changed
+
+- **Tool count**: 16 to 22 (6 new tools)
+- **`AppContext`** now carries a `read_only` field, set from the `GRAFEO_READ_ONLY` environment variable at startup
+- 117 tests, 82% coverage
+
 ## [0.1.2] - 2026-03-01
 
 Quality and correctness patch: shared helpers, dead code removal, and fixes for misleading output.
@@ -37,5 +58,6 @@ Initial release.
 - Dual transport: stdio (default) and streamable-http for remote deployments
 - 75 tests, 79% coverage
 
+[0.1.3]: https://github.com/GrafeoDB/grafeo-mcp/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/GrafeoDB/grafeo-mcp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/GrafeoDB/grafeo-mcp/releases/tag/v0.1.1

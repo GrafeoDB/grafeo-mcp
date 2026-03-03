@@ -7,10 +7,14 @@ import json
 from grafeo_mcp.tools.graph import (
     create_edge,
     create_node,
+    delete_edge,
+    delete_node,
     get_neighbors,
     get_node,
     graph_info,
     search_nodes_by_label,
+    update_edge,
+    update_node,
 )
 
 # ---------------------------------------------------------------------------
@@ -159,3 +163,106 @@ class TestGetNeighbors:
     def test_limit(self, populated_ctx):
         result = json.loads(get_neighbors(0, limit=1, ctx=populated_ctx))
         assert result["count"] <= 1
+
+
+# ---------------------------------------------------------------------------
+# update_node
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateNode:
+    def test_merge_properties(self, ctx):
+        node = json.loads(create_node(["Person"], {"name": "Eve", "age": 25}, ctx=ctx))
+        result = json.loads(update_node(node["id"], {"age": 26}, ctx=ctx))
+        assert result["properties"]["age"] == 26
+        assert result["properties"]["name"] == "Eve"
+
+    def test_replace_properties(self, ctx):
+        node = json.loads(create_node(["Person"], {"name": "Eve", "age": 25}, ctx=ctx))
+        result = json.loads(update_node(node["id"], {"name": "Eve"}, merge=False, ctx=ctx))
+        assert result["properties"]["name"] == "Eve"
+        assert "age" not in result["properties"]
+
+    def test_add_new_property(self, ctx):
+        node = json.loads(create_node(["Person"], {"name": "Eve"}, ctx=ctx))
+        result = json.loads(update_node(node["id"], {"email": "eve@test.com"}, ctx=ctx))
+        assert result["properties"]["email"] == "eve@test.com"
+        assert result["properties"]["name"] == "Eve"
+
+    def test_not_found(self, ctx):
+        result = update_node(9999, {"x": 1}, ctx=ctx)
+        assert "not found" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# delete_node
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteNode:
+    def test_detach_delete(self, populated_ctx):
+        result = delete_node(0, detach=True, ctx=populated_ctx)
+        assert "deleted" in result.lower()
+        assert "edge" in result.lower()
+        verify = get_node(0, ctx=populated_ctx)
+        assert "not found" in verify.lower()
+
+    def test_delete_isolated_node(self, ctx):
+        node = json.loads(create_node(["Temp"], ctx=ctx))
+        result = delete_node(node["id"], ctx=ctx)
+        assert "deleted" in result.lower()
+        verify = get_node(node["id"], ctx=ctx)
+        assert "not found" in verify.lower()
+
+    def test_no_detach_fails_with_edges(self, populated_ctx):
+        result = delete_node(0, detach=False, ctx=populated_ctx)
+        assert "connected edge" in result.lower()
+
+    def test_not_found(self, ctx):
+        result = delete_node(9999, ctx=ctx)
+        assert "not found" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# update_edge
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateEdge:
+    def test_merge_properties(self, ctx):
+        n1 = json.loads(create_node(["A"], ctx=ctx))
+        n2 = json.loads(create_node(["B"], ctx=ctx))
+        edge = json.loads(create_edge(n1["id"], n2["id"], "REL", {"weight": 1.0}, ctx=ctx))
+        result = json.loads(update_edge(edge["id"], {"score": 0.9}, ctx=ctx))
+        assert result["properties"]["weight"] == 1.0
+        assert result["properties"]["score"] == 0.9
+
+    def test_replace_properties(self, ctx):
+        n1 = json.loads(create_node(["A"], ctx=ctx))
+        n2 = json.loads(create_node(["B"], ctx=ctx))
+        edge = json.loads(create_edge(n1["id"], n2["id"], "REL", {"weight": 1.0, "note": "hi"}, ctx=ctx))
+        result = json.loads(update_edge(edge["id"], {"weight": 2.0}, merge=False, ctx=ctx))
+        assert result["properties"]["weight"] == 2.0
+        assert "note" not in result["properties"]
+
+    def test_not_found(self, ctx):
+        result = update_edge(9999, {"x": 1}, ctx=ctx)
+        assert "not found" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# delete_edge
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteEdge:
+    def test_basic(self, ctx):
+        n1 = json.loads(create_node(["A"], ctx=ctx))
+        n2 = json.loads(create_node(["B"], ctx=ctx))
+        edge = json.loads(create_edge(n1["id"], n2["id"], "REL", ctx=ctx))
+        result = delete_edge(edge["id"], ctx=ctx)
+        assert "deleted" in result.lower()
+
+    def test_not_found(self, ctx):
+        result = delete_edge(9999, ctx=ctx)
+        assert "not found" in result.lower()
