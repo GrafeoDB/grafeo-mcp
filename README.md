@@ -11,7 +11,7 @@ One install, zero infrastructure. The MCP server *is* the database.
 
 ## Features
 
-- **16 tools** - graph CRUD, GQL queries, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
+- **23 tools** - graph CRUD, GQL queries, batch import, full-text search, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
 - **3 resources** - `graph://schema`, `graph://stats`, `graph://nodes/{id}`
 - **4 workflow prompts** - guide agents through exploration, knowledge extraction, graph analysis and similarity search
 - **GQL with Cypher auto-normalization** - agents trained on Cypher syntax work out of the box
@@ -109,9 +109,26 @@ grafeo-mcp streamable-http
 | `create_node`           | Create a node with labels and properties   |
 | `create_edge`           | Create a directed edge between two nodes   |
 | `get_node`              | Retrieve a node by ID                      |
+| `update_node`           | Update properties on an existing node      |
+| `delete_node`           | Delete a node (with optional detach)       |
+| `update_edge`           | Update properties on an existing edge      |
+| `delete_edge`           | Delete an edge by ID                       |
 | `get_neighbors`         | Explore a node's neighborhood (1-hop)      |
 | `search_nodes_by_label` | Find nodes by label with pagination        |
 | `graph_info`            | Schema, stats, labels, edge types, indexes |
+
+### Batch Import
+
+| Tool           | Description                                       |
+| -------------- | ------------------------------------------------- |
+| `batch_import` | Bulk-create nodes and edges from JSON arrays      |
+
+### Full-Text Search
+
+| Tool                | Description                                     |
+| ------------------- | ----------------------------------------------- |
+| `create_text_index` | Create a full-text search index on a property   |
+| `search_text`       | Keyword search over indexed string properties   |
 
 ### Vector Search
 
@@ -148,6 +165,57 @@ grafeo-mcp streamable-http
 | `knowledge_extraction` | Extract entities and relationships from text      |
 | `graph_analysis`       | Structural analysis: communities, PageRank, hubs  |
 | `similarity_search`    | Vector-powered semantic search with graph context |
+
+## Which tool when?
+
+| I want to...                          | Use this tool             | Not this                 |
+| ------------------------------------- | ------------------------- | ------------------------ |
+| Add a single node                     | `create_node`             | `execute_gql`, `batch_import` |
+| Add a single edge                     | `create_edge`             | `execute_gql`            |
+| Load many nodes and edges at once     | `batch_import`            | `create_node` in a loop  |
+| Look up a node by ID                  | `get_node`                | `execute_gql`            |
+| Update a node's properties            | `update_node`             | `execute_gql`            |
+| Delete a node                         | `delete_node`             | `execute_gql`            |
+| Update an edge's properties           | `update_edge`             | `execute_gql`            |
+| Delete an edge                        | `delete_edge`             | `execute_gql`            |
+| Browse nodes of a type                | `search_nodes_by_label`   | `execute_gql`            |
+| Explore one hop from a node           | `get_neighbors`           | `execute_gql`            |
+| Run a complex or multi-hop query      | `execute_gql`             | multiple `get_neighbors` |
+| Search by keyword in text             | `search_text`             | `execute_gql`            |
+| Find similar nodes by embedding       | `vector_search`           | `execute_gql`            |
+| Find similar nodes + graph context    | `vector_graph_search`     | `vector_search` + `get_neighbors` |
+| Find the most important nodes         | `pagerank`                | `execute_gql`            |
+| Find shortest path between two nodes  | `dijkstra`                | `execute_gql`            |
+| Detect communities                    | `louvain`                 | `execute_gql`            |
+| Understand the graph before querying  | `graph_info`              | `search_nodes_by_label`  |
+
+## Batch reference syntax
+
+The `batch_import` tool lets edges reference nodes created in the same batch using `@N` notation, where `N` is the zero-based index into the `nodes` array:
+
+```python
+batch_import(
+    nodes=[
+        {"labels": ["Person"], "properties": {"name": "Alice"}},  # @0
+        {"labels": ["Person"], "properties": {"name": "Bob"}},    # @1
+    ],
+    edges=[
+        {"source_ref": "@0", "target_ref": "@1", "edge_type": "KNOWS"},
+    ],
+)
+```
+
+You can also mix batch references with existing node IDs: `{"source_ref": "@0", "target_ref": 42, ...}`.
+
+## Cypher normalization
+
+The `execute_gql` tool automatically normalizes common Cypher syntax to GQL so agents trained on Cypher work out of the box. Currently the following transformations are applied:
+
+| Cypher keyword | GQL equivalent |
+| -------------- | -------------- |
+| `CREATE`       | `INSERT`       |
+
+Keywords that are shared between Cypher and GQL (such as `MATCH`, `RETURN`, `WHERE`, `WITH`, `LIMIT`, `DETACH DELETE`) pass through unchanged. Cypher-only keywords like `MERGE` or `OPTIONAL MATCH` are **not** supported and will produce a clear error message from the query engine.
 
 ## Development
 
