@@ -122,3 +122,50 @@ class TestBatchImport:
         for _idx_str, nid in nmap.items():
             node_result = json.loads(get_node(nid, ctx=ctx))
             assert "id" in node_result
+
+
+# ---------------------------------------------------------------------------
+# T6: Batch import partial failure — atomicity behavior
+# ---------------------------------------------------------------------------
+
+
+class TestBatchPartialFailure:
+    def test_five_valid_plus_one_invalid(self, ctx):
+        """5 valid nodes + 1 edge with an invalid batch ref.
+
+        batch_import is NOT atomic: already-created nodes remain in the
+        graph even when a subsequent edge fails. This test documents that
+        behavior.
+        """
+        result = batch_import(
+            nodes=[{"labels": ["Item"], "properties": {"n": i}} for i in range(5)],
+            edges=[
+                # Valid edge between first two batch nodes
+                {"source_ref": "@0", "target_ref": "@1", "edge_type": "NEXT"},
+                # Invalid: batch ref @99 does not exist
+                {"source_ref": "@99", "target_ref": "@0", "edge_type": "BAD"},
+            ],
+            ctx=ctx,
+        )
+        # The batch should fail on the invalid edge ref
+        assert "error" in result.lower()
+
+        # Verify that the 5 nodes were still created (non-atomic)
+        from grafeo_mcp.tools.graph import graph_info
+
+        info = json.loads(graph_info(ctx=ctx))
+        assert info["info"]["node_count"] == 5
+
+    def test_all_valid_succeeds(self, ctx):
+        """Baseline: 5 valid nodes + 1 valid edge all succeed."""
+        result = json.loads(
+            batch_import(
+                nodes=[{"labels": ["Item"], "properties": {"n": i}} for i in range(5)],
+                edges=[
+                    {"source_ref": "@0", "target_ref": "@1", "edge_type": "NEXT"},
+                ],
+                ctx=ctx,
+            )
+        )
+        assert result["created_nodes"] == 5
+        assert result["created_edges"] == 1
