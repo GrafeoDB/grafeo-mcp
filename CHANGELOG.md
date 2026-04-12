@@ -5,6 +5,34 @@ All notable changes to grafeo-mcp are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4]
+
+Test coverage, error handling and documentation improvements.
+
+### Added
+
+- **Error handling tests**: malformed GQL, dangling edges, duplicate nodes, missing node updates/deletes, invalid direction parameter
+- **Edge case tests**: vector search without index, algorithms on empty graph, dijkstra on disconnected graph, large result truncation
+- **Batch atomicity test**: documented that `batch_import` is not atomic; valid entries persist on partial failure
+- **Read-only exhaustive test**: parametrized over all 9 mutation tools for consistent error format
+- **Cypher normalization tests**: MERGE, MATCH, OPTIONAL MATCH, WITH clause coverage
+- **Resource mutation tests**: schema, stats, node resources verified after mutations
+- **Prompt rendering tests**: all 4 prompts verified with no unresolved placeholders
+
+### Fixed
+
+- Test assertions in `test_tools_query.py` used `or` instead of `and`, making them always pass
+- Node ID assertion in dijkstra test matched single characters instead of actual IDs
+- Prompt placeholder check now detects both `{{double}}` and `{single}` brace patterns
+
+### Changed
+
+- README: tool count corrected from 16 to 23, added 7 missing tools to tables
+- README: added "Which tool when?" decision matrix
+- README: documented `@N` batch reference syntax
+- README: documented Cypher normalization scope
+- 174 tests passing, 82% coverage
+
 ## [0.1.3] - 2026-03-03
 
 CRUD completion, batch import, full-text search, and read-only mode.
