@@ -157,3 +157,81 @@ class TestVectorGraphSearch:
         )
         # No expansion — neighbors should be empty
         assert result["neighbor_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Query vector checks (a wrong size used to crash the whole server)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryVectorChecks:
+    def test_dimension_mismatch_is_an_error(self, vector_ctx):
+        result = vector_search("Doc", "emb", [1.0, 0.0], k=3, ctx=vector_ctx)
+        assert result.startswith("Error: vector_search: query_vector has 2 dimensions but the :Doc.emb vectors have 4")
+
+    def test_dimension_mismatch_in_hybrid_and_mmr(self, vector_ctx):
+        from grafeo_mcp.tools.vector import mmr_search
+
+        assert vector_graph_search("Doc", "emb", [1.0], ctx=vector_ctx).startswith("Error: vector_graph_search:")
+        assert mmr_search("Doc", "emb", [1.0], ctx=vector_ctx).startswith("Error: mmr_search:")
+
+    def test_empty_query_vector(self, vector_ctx):
+        assert "query_vector is empty" in vector_search("Doc", "emb", [], ctx=vector_ctx)
+
+    def test_unseen_dimension_mismatch_does_not_raise(self, ctx):
+        # When the sampled nodes hold no vector the size cannot be checked up
+        # front; the engine's failure (a panic in grafeo 0.5.44) still comes
+        # back as an error string and the database stays usable.
+        db = ctx.request_context.lifespan_context.db
+        for i in range(25):
+            db.create_node(["Doc"], {"i": i})
+        db.create_node(["Doc"], {"emb": [1.0, 0.0, 0.0]})
+        db.create_vector_index("Doc", "emb", 3, "cosine")
+        result = vector_search("Doc", "emb", [1.0, 0.0], k=3, ctx=ctx)
+        assert result.startswith("Error: vector_search: ")
+        assert json.loads(vector_search("Doc", "emb", [1.0, 0.0, 0.0], k=1, ctx=ctx))[0]["node_id"] == 25
+
+    def test_k_must_be_positive(self, vector_ctx):
+        assert "k must be at least 1" in vector_search("Doc", "emb", [1.0, 0.0, 0.0, 0.0], k=0, ctx=vector_ctx)
+
+
+# ---------------------------------------------------------------------------
+# vector_graph_search expansion
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def chain_ctx():
+    """seed -CITES-> a -CITES-> b, and seed -MENTIONS-> c."""
+    database = grafeo.GrafeoDB()
+    seed = database.create_node(["Doc"], {"name": "seed", "emb": [1.0, 0.0]})
+    a = database.create_node(["Doc"], {"name": "a"})
+    b = database.create_node(["Doc"], {"name": "b"})
+    c = database.create_node(["Doc"], {"name": "c"})
+    database.create_edge(seed.id, a.id, "CITES")
+    database.create_edge(a.id, b.id, "CITES")
+    database.create_edge(seed.id, c.id, "MENTIONS")
+    database.create_vector_index("Doc", "emb", 2, "cosine")
+    yield _make_ctx(database)
+    database.close()
+
+
+class TestVectorGraphExpansion:
+    def test_two_hops(self, chain_ctx):
+        result = json.loads(vector_graph_search("Doc", "emb", [1.0, 0.0], k=1, expand_depth=2, ctx=chain_ctx))
+        hops = {n["properties"]["name"]: n["hop"] for n in result["neighbors"]}
+        assert hops == {"a": 1, "c": 1, "b": 2}
+
+    def test_edge_type_filter(self, chain_ctx):
+        result = json.loads(
+            vector_graph_search("Doc", "emb", [1.0, 0.0], k=1, expand_depth=2, expand_edge_type="CITES", ctx=chain_ctx)
+        )
+        assert sorted(n["properties"]["name"] for n in result["neighbors"]) == ["a", "b"]
+
+    def test_edge_type_is_a_value_not_query_text(self, chain_ctx):
+        injected = "CITES]-(b) DETACH DELETE b WITH b MATCH (a)-[r"
+        result = json.loads(
+            vector_graph_search("Doc", "emb", [1.0, 0.0], k=1, expand_edge_type=injected, ctx=chain_ctx)
+        )
+        assert result["neighbor_count"] == 0
+        assert chain_ctx.request_context.lifespan_context.db.node_count == 4

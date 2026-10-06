@@ -3,7 +3,7 @@
     "grafeo": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "/path/to/your/graph.db"
+        "GRAFEO_DB_PATH": "/path/to/your/graph.grafeo"
       }
     }
   }

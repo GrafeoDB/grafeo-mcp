@@ -109,3 +109,54 @@ class TestResourcesAfterMutation:
         assert "Labels:" in result
         assert "Properties:" in result
         assert "Connections:" in result
+
+
+# ---------------------------------------------------------------------------
+# Regressions: query rows are dicts, so positional access found nothing
+# ---------------------------------------------------------------------------
+
+
+class TestResourceRegressions:
+    def test_connection_summary_counts_edges(self, populated_ctx):
+        # Bob (1): incoming KNOWS from Alice; outgoing KNOWS to Charlie and
+        # WORKS_AT to Acme. This used to read "isolated node, no edges".
+        result = get_node_resource("1", ctx=populated_ctx)
+        assert "Connections: 3 total" in result
+        assert "Outgoing: KNOWS (1), WORKS_AT (1)" in result or "Outgoing: WORKS_AT (1), KNOWS (1)" in result
+        assert "Incoming: KNOWS (1)" in result
+
+    def test_isolated_node(self, ctx):
+        node = json.loads(create_node(["Lonely"], ctx=ctx))
+        assert "isolated node" in get_node_resource(str(node["id"]), ctx=ctx)
+
+    def test_negative_node_id(self, ctx):
+        assert "not a valid node ID" in get_node_resource("-1", ctx=ctx)
+
+    def test_schema_edge_patterns(self, populated_ctx):
+        # Used to print "(?)-[:KNOWS]->(?)" for every edge type.
+        result = graph_schema(ctx=populated_ctx)
+        assert "(:Person)-[:KNOWS]->(:Person)" in result
+        assert "(:Person)-[:WORKS_AT]->(:Company)" in result
+
+    def test_schema_edge_type_with_space(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        a = db.create_node(["A"])
+        b = db.create_node(["B"])
+        db.create_edge(a.id, b.id, "PART OF")
+        assert "(:A)-[:PART OF]->(:B)" in graph_schema(ctx=ctx)
+
+    def test_schema_lists_indexes(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        db.create_node(["Doc"], {"title": "graph theory", "emb": [1.0, 0.0], "slug": "s"})
+        db.create_vector_index("Doc", "emb", 2, "cosine")
+        db.create_text_index("Doc", "title")
+        db.create_property_index("slug")
+        result = graph_schema(ctx=ctx)
+        assert "Vector indexes:\n  :Doc.emb (1 indexed)" in result
+        assert "Text indexes:\n  :Doc.title (1 indexed)" in result
+        assert "Property indexes:\n  .slug" in result
+
+    def test_schema_without_indexes(self, ctx):
+        result = graph_schema(ctx=ctx)
+        assert "(none: create one with create_vector_index)" in result
+        assert "(none: create one with create_text_index)" in result

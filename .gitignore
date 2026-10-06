@@ -37,3 +37,5 @@ htmlcov/
 
 # ── Database files (don't commit user data) ──────────────────────────
 *.db
+*.grafeo
+*.grafeo.*

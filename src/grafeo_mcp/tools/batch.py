@@ -5,8 +5,15 @@ from typing import Any
 from mcp.server.fastmcp import Context
 from mcp.server.session import ServerSession
 
-from grafeo_mcp.server import AppContext, mcp
-from grafeo_mcp.tools._helpers import _read_only_guard, _truncate
+from grafeo_mcp.server import AppContext
+from grafeo_mcp.tools._helpers import (
+    _is_engine_panic,
+    _read_only_guard,
+    _truncate,
+    describe_exception,
+    grafeo_tool,
+    tool_error,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -15,47 +22,99 @@ from grafeo_mcp.tools._helpers import _read_only_guard, _truncate
 _MAX_BATCH_NODES = 500
 _MAX_BATCH_EDGES = 1000
 
+_TOOL = "batch_import"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _resolve_ref(
-    ref: Any,
-    node_id_map: dict[int, int],
-    edge_idx: int,
-    field_name: str,
-) -> int | str:
-    """Resolve a node reference to an actual node ID.
+class _BatchError(Exception):
+    """A problem with the batch itself, reported before anything is written."""
 
-    Returns an int (the node ID) on success, or an error string on failure.
-    """
+
+def _parse_ref(ref: Any, batch_size: int, edge_idx: int, field_name: str) -> tuple[str, int]:
+    """Parse a node reference into ("batch", index) or ("id", node_id)."""
     if ref is None:
-        return f"Error: edge at index {edge_idx} has no {field_name}."
+        raise _BatchError(f"edge at index {edge_idx} has no {field_name}")
+    if isinstance(ref, bool):
+        raise _BatchError(f"edge at index {edge_idx} has invalid {field_name} {ref!r}")
     if isinstance(ref, int):
-        return ref
+        if ref < 0:
+            raise _BatchError(f"edge at index {edge_idx} has negative {field_name} {ref}")
+        return ("id", ref)
     if isinstance(ref, str) and ref.startswith("@"):
         try:
             batch_idx = int(ref[1:])
         except ValueError:
-            return (
-                f"Error: edge at index {edge_idx} has invalid {field_name} "
-                f"'{ref}'. Use '@N' where N is a node array index."
-            )
-        if batch_idx not in node_id_map:
-            return (
-                f"Error: edge at index {edge_idx} references {field_name}='{ref}', "
+            raise _BatchError(
+                f"edge at index {edge_idx} has invalid {field_name} '{ref}'. Use '@N' where N is a node array index"
+            ) from None
+        if not 0 <= batch_idx < batch_size:
+            raise _BatchError(
+                f"edge at index {edge_idx} references {field_name}='{ref}', "
                 f"but node index {batch_idx} does not exist "
-                f"(batch has {len(node_id_map)} nodes, indices 0-{len(node_id_map) - 1})."
+                f"(batch has {batch_size} nodes, indices 0-{batch_size - 1})"
             )
-        return node_id_map[batch_idx]
+        return ("batch", batch_idx)
     try:
-        return int(ref)
+        node_id = int(ref)
     except (TypeError, ValueError):
-        return (
-            f"Error: edge at index {edge_idx} has invalid {field_name} "
-            f"'{ref}'. Use an integer node ID or '@N' batch reference."
-        )
+        raise _BatchError(
+            f"edge at index {edge_idx} has invalid {field_name} '{ref}'. Use an integer node ID or '@N' batch reference"
+        ) from None
+    if node_id < 0:
+        raise _BatchError(f"edge at index {edge_idx} has negative {field_name} {node_id}")
+    return ("id", node_id)
+
+
+def _validate(db: Any, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> list[tuple]:
+    """Check the whole batch and return the parsed edges; raises _BatchError."""
+    for idx, node_spec in enumerate(nodes):
+        if not isinstance(node_spec, dict):
+            raise _BatchError(f"node at index {idx} is not an object with 'labels' and 'properties'")
+        labels = node_spec.get("labels")
+        if not labels:
+            raise _BatchError(f"node at index {idx} has no labels. Every node needs at least one label")
+        if not isinstance(labels, list) or not all(isinstance(label, str) and label for label in labels):
+            raise _BatchError(f"node at index {idx} has invalid labels {labels!r}: use a list of non-empty strings")
+        props = node_spec.get("properties")
+        if props is not None and not isinstance(props, dict):
+            raise _BatchError(f"node at index {idx} has properties that are not an object")
+
+    parsed: list[tuple] = []
+    for idx, edge_spec in enumerate(edges):
+        if not isinstance(edge_spec, dict):
+            raise _BatchError(f"edge at index {idx} is not an object")
+        edge_type = edge_spec.get("edge_type")
+        if not edge_type or not isinstance(edge_type, str):
+            raise _BatchError(f"edge at index {idx} has no edge_type. Every edge needs an edge_type string")
+        props = edge_spec.get("properties")
+        if props is not None and not isinstance(props, dict):
+            raise _BatchError(f"edge at index {idx} has properties that are not an object")
+        source = _parse_ref(edge_spec.get("source_ref"), len(nodes), idx, "source_ref")
+        target = _parse_ref(edge_spec.get("target_ref"), len(nodes), idx, "target_ref")
+        for field_name, (kind, value) in (("source_ref", source), ("target_ref", target)):
+            if kind == "id" and db.get_node(value) is None:
+                raise _BatchError(f"edge at index {idx} has {field_name}={value}, but node {value} does not exist")
+        parsed.append((source, target, edge_type, props))
+    return parsed
+
+
+def _rollback(db: Any, node_ids: list[int], edge_ids: list[int]) -> str | None:
+    """Delete what a failed batch created; return a description of anything left behind."""
+    leftovers: list[str] = []
+    for edge_id in reversed(edge_ids):
+        try:
+            db.delete_edge(edge_id)
+        except Exception:
+            leftovers.append(f"edge {edge_id}")
+    for node_id in reversed(node_ids):
+        try:
+            db.delete_node(node_id)
+        except Exception:
+            leftovers.append(f"node {node_id}")
+    return ", ".join(leftovers) if leftovers else None
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +122,7 @@ def _resolve_ref(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@grafeo_tool(read_only=False)
 def batch_import(
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]] | None = None,
@@ -79,16 +138,18 @@ def batch_import(
 
     Nodes are created first, then edges. Edges can reference nodes created
     in this batch using "@index" notation (e.g. "@0" refers to the first
-    node in the nodes array).
+    node in the nodes array), or existing nodes by their integer ID.
 
-    Note: this operation is not atomic. If an error occurs partway through,
-    already-created nodes/edges remain in the graph.
+    All or nothing: the whole batch is checked before anything is written
+    (labels, edge types, "@N" references, and that referenced node IDs
+    exist), and if the engine rejects a node or edge partway (for example a
+    schema constraint), everything this call created is removed again.
 
     Args:
-        nodes: List of node objects, each with:
+        nodes: List of node objects (at most 500), each with:
             - labels: list of strings (required)
             - properties: dict of key-value pairs (optional)
-        edges: List of edge objects, each with:
+        edges: List of edge objects (at most 1000), each with:
             - source_ref: int (existing node ID) or str ("@0", "@1", ...)
               referencing a node by its index in the nodes array
             - target_ref: int (existing node ID) or str ("@0", "@1", ...)
@@ -111,68 +172,59 @@ def batch_import(
         )
     """
     assert ctx is not None
-    if ro := _read_only_guard(ctx):
+    if ro := _read_only_guard(ctx, _TOOL):
         return ro
-    try:
-        db = ctx.request_context.lifespan_context.db
-        edges = edges or []
+    edges = edges or []
 
-        if len(nodes) > _MAX_BATCH_NODES:
-            return (
-                f"Error: batch contains {len(nodes)} nodes, "
-                f"exceeding the limit of {_MAX_BATCH_NODES}. "
-                "Split into smaller batches."
-            )
-        if len(edges) > _MAX_BATCH_EDGES:
-            return (
-                f"Error: batch contains {len(edges)} edges, "
-                f"exceeding the limit of {_MAX_BATCH_EDGES}. "
-                "Split into smaller batches."
-            )
-
-        # --- Create nodes ---
-        node_id_map: dict[int, int] = {}
-        created_nodes = 0
-        for idx, node_spec in enumerate(nodes):
-            labels = node_spec.get("labels", [])
-            if not labels:
-                return f"Error: node at index {idx} has no labels. Every node needs at least one label."
-            props = node_spec.get("properties")
-            node = db.create_node(labels, props)
-            node_id_map[idx] = node.id
-            created_nodes += 1
-
-        # --- Resolve edge references and create edges ---
-        created_edges = 0
-        for idx, edge_spec in enumerate(edges):
-            source_ref = edge_spec.get("source_ref")
-            target_ref = edge_spec.get("target_ref")
-            edge_type = edge_spec.get("edge_type")
-            props = edge_spec.get("properties")
-
-            if not edge_type:
-                return f"Error: edge at index {idx} has no edge_type. Every edge needs an edge_type string."
-
-            source_id = _resolve_ref(source_ref, node_id_map, idx, "source_ref")
-            if isinstance(source_id, str):
-                return source_id
-            target_id = _resolve_ref(target_ref, node_id_map, idx, "target_ref")
-            if isinstance(target_id, str):
-                return target_id
-
-            db.create_edge(source_id, target_id, edge_type, props)
-            created_edges += 1
-
-        payload = {
-            "created_nodes": created_nodes,
-            "created_edges": created_edges,
-            "node_id_map": {str(k): v for k, v in node_id_map.items()},
-        }
-        return _truncate(payload)
-    except Exception as exc:
-        return (
-            f"Batch import failed: {exc}. "
-            "Check that all node specs have 'labels' and all edge specs "
-            "have 'source_ref', 'target_ref', and 'edge_type'. "
-            "Try graph_info to verify the current state."
+    if len(nodes) > _MAX_BATCH_NODES:
+        return tool_error(
+            _TOOL,
+            f"batch contains {len(nodes)} nodes, exceeding the limit of {_MAX_BATCH_NODES}",
+            "split the data into smaller batches.",
         )
+    if len(edges) > _MAX_BATCH_EDGES:
+        return tool_error(
+            _TOOL,
+            f"batch contains {len(edges)} edges, exceeding the limit of {_MAX_BATCH_EDGES}",
+            "split the data into smaller batches.",
+        )
+
+    db = ctx.request_context.lifespan_context.db
+    try:
+        parsed_edges = _validate(db, nodes, edges)
+    except _BatchError as exc:
+        return tool_error(_TOOL, f"{exc}; nothing was written", "fix the batch and send it again.")
+
+    created_nodes: list[int] = []
+    created_edges: list[int] = []
+    step = "node at index 0"
+    try:
+        for idx, node_spec in enumerate(nodes):
+            step = f"node at index {idx}"
+            created_nodes.append(db.create_node(node_spec["labels"], node_spec.get("properties")).id)
+        for idx, ((src_kind, src), (dst_kind, dst), edge_type, props) in enumerate(parsed_edges):
+            step = f"edge at index {idx}"
+            source_id = created_nodes[src] if src_kind == "batch" else src
+            target_id = created_nodes[dst] if dst_kind == "batch" else dst
+            created_edges.append(db.create_edge(source_id, target_id, edge_type, props).id)
+    except BaseException as exc:
+        if not isinstance(exc, Exception) and not _is_engine_panic(exc):
+            raise
+        leftovers = _rollback(db, created_nodes, created_edges)
+        outcome = (
+            "everything this call created was removed again"
+            if leftovers is None
+            else f"these could not be removed: {leftovers}"
+        )
+        return tool_error(
+            _TOOL,
+            f"the engine rejected the {step}: {describe_exception(exc)}; {outcome}",
+            "check the schema and constraints with graph_info, fix the batch and send it again.",
+        )
+
+    payload = {
+        "created_nodes": len(created_nodes),
+        "created_edges": len(created_edges),
+        "node_id_map": {str(idx): node_id for idx, node_id in enumerate(created_nodes)},
+    }
+    return _truncate(payload)

@@ -14,9 +14,10 @@ One install, zero infrastructure. The MCP server *is* the database.
 - **23 tools** - graph CRUD, GQL queries, batch import, full-text search, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
 - **3 resources** - `graph://schema`, `graph://stats`, `graph://nodes/{id}`
 - **4 workflow prompts** - guide agents through exploration, knowledge extraction, graph analysis and similarity search
-- **GQL with Cypher auto-normalization** - agents trained on Cypher syntax work out of the box
+- **GQL with Cypher-style syntax** - `CREATE`, `MERGE` and `OPTIONAL MATCH` run as written, with query parameters and write counters
 - **Schema-first** - agents discover the graph structure before querying
-- **Token-aware** - all tools have `limit` params and truncate large results
+- **Token-aware** - all tools have `limit` params and cut large results down to valid JSON
+- **Agent-friendly errors** - every failure is one `Error: <tool>: ...` message with a hint, flagged `isError` over MCP
 - **Embedded** - no separate database server to manage
 
 ## Quickstart
@@ -25,9 +26,11 @@ One install, zero infrastructure. The MCP server *is* the database.
 # Install
 uv tool install grafeo-mcp
 
-# Or with pip
-pip install grafeo-mcp
+# Or run it without installing
+uvx grafeo-mcp
 ```
+
+grafeo-mcp needs grafeo 0.5.44 or later (below 0.7); see [Storage and upgrading](#storage-and-upgrading).
 
 ### Claude Desktop
 
@@ -39,7 +42,7 @@ Add to `claude_desktop_config.json`:
     "grafeo": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "/path/to/your/graph.db"
+        "GRAFEO_DB_PATH": "/path/to/your/graph.grafeo"
       }
     }
   }
@@ -56,7 +59,7 @@ Add to `.mcp.json` in your project root:
     "grafeo": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "./graph.db"
+        "GRAFEO_DB_PATH": "./graph.grafeo"
       }
     }
   }
@@ -73,7 +76,7 @@ Add to `.vscode/mcp.json`:
     "grafeo": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "${workspaceFolder}/graph.db"
+        "GRAFEO_DB_PATH": "${workspaceFolder}/graph.grafeo"
       }
     }
   }
@@ -90,9 +93,21 @@ grafeo-mcp streamable-http
 
 ## Environment Variables
 
-| Variable         | Description                                               | Default   |
-| ---------------- | --------------------------------------------------------- | --------- |
-| `GRAFEO_DB_PATH` | Path to the database file. Creates it if it doesn't exist | In-memory |
+| Variable           | Description                                                                                | Default   |
+| ------------------ | ------------------------------------------------------------------------------------------ | --------- |
+| `GRAFEO_DB_PATH`   | Path to the database. Use a `.grafeo` file; it is created if it doesn't exist              | In-memory |
+| `GRAFEO_READ_ONLY` | `1`, `true`, `yes` or `on` disables every write (mutation tools and writing `execute_gql`) | Off       |
+
+### Read-only mode
+
+With `GRAFEO_READ_ONLY=1` the mutation tools stay visible but return an error, and `execute_gql` refuses queries with `INSERT`, `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DROP` or `ALTER` and runs the rest in a transaction that is always rolled back. When `GRAFEO_DB_PATH` names an existing `.grafeo` file, the server also opens it with grafeo's read-only mode: the engine itself rejects writes, several read-only servers can share the file, and grafeo 0.6 reads a 0.5.x file without migrating it.
+
+## Storage and upgrading
+
+- **Use a single-file `.grafeo` path.** Any other path (such as `graph.db`) creates a WAL-directory database. grafeo 0.5.x reopens a directory database without its vector, text and property indexes, so `vector_search` and `search_text` fail after a restart until the index is created again; the server logs a warning for such paths. The single file is grafeo's recommended format, and WAL-directory storage is deprecated as of grafeo 0.6.
+- **One writer at a time.** A database file can be open for writing by one process. Run one grafeo-mcp server per file, or use read-only mode for extra readers.
+- **Upgrading to grafeo 0.6.** grafeo 0.6.0 writes a new file format. The first read-write open of a 0.5.x `.grafeo` file migrates it in place and keeps the old file next to it as `graph.grafeo.pre-0.6` (and its WAL as `graph.grafeo.pre-0.6.wal`). Before the first start on 0.6, stop every 0.5.x process that uses the file and make sure there is free disk space for a copy of the database. After the migration grafeo 0.5.x can no longer open the file; to go back, see [Upgrading from 0.5](https://grafeo.dev/user-guide/persistence/persistent/#upgrading-from-05). A read-only server does not migrate the file. grafeo 0.7 will not read 0.5.x files, so open each database read-write with 0.6 once before moving on.
+- **Pinning.** Until grafeo 1.0 a minor release may change the file format or the API, so grafeo-mcp pins the grafeo minor versions it is tested with (currently `grafeo>=0.5.44,<0.7`). A weekly CI job runs the test suite against the newest grafeo in that range, pre-releases included.
 
 ## Tools
 
@@ -100,7 +115,7 @@ grafeo-mcp streamable-http
 
 | Tool          | Description                                            |
 | ------------- | ------------------------------------------------------ |
-| `execute_gql` | Run GQL queries (Cypher syntax auto-normalized to GQL) |
+| `execute_gql` | Run one GQL query, with parameters and write counters  |
 
 ### Graph CRUD & Traversal
 
@@ -115,7 +130,7 @@ grafeo-mcp streamable-http
 | `delete_edge`           | Delete an edge by ID                       |
 | `get_neighbors`         | Explore a node's neighborhood (1-hop)      |
 | `search_nodes_by_label` | Find nodes by label with pagination        |
-| `graph_info`            | Schema, stats, labels, edge types, indexes |
+| `graph_info`            | Schema, stats, indexes and engine features |
 
 ### Batch Import
 
@@ -174,6 +189,7 @@ grafeo-mcp streamable-http
 | Add a single edge                     | `create_edge`             | `execute_gql`            |
 | Load many nodes and edges at once     | `batch_import`            | `create_node` in a loop  |
 | Look up a node by ID                  | `get_node`                | `execute_gql`            |
+| Create or update a node by a key      | `execute_gql` with `MERGE` and `params` | `create_node` |
 | Update a node's properties            | `update_node`             | `execute_gql`            |
 | Delete a node                         | `delete_node`             | `execute_gql`            |
 | Update an edge's properties           | `update_edge`             | `execute_gql`            |
@@ -207,15 +223,24 @@ batch_import(
 
 You can also mix batch references with existing node IDs: `{"source_ref": "@0", "target_ref": 42, ...}`.
 
-## Cypher normalization
+A batch is all or nothing: it is checked completely before anything is written (labels, edge types, `@N` references, and that referenced node IDs exist), and if the engine rejects a node or edge partway (for example a `UNIQUE` constraint), everything the call created is removed again.
 
-The `execute_gql` tool automatically normalizes common Cypher syntax to GQL so agents trained on Cypher work out of the box. Currently the following transformations are applied:
+## Queries
 
-| Cypher keyword | GQL equivalent |
-| -------------- | -------------- |
-| `CREATE`       | `INSERT`       |
+`execute_gql` passes the query text to grafeo's GQL engine unchanged. The engine also accepts common Cypher syntax such as `CREATE`, `MERGE`, `OPTIONAL MATCH` and `DETACH DELETE`, so agents trained on Cypher work out of the box.
 
-Keywords that are shared between Cypher and GQL (such as `MATCH`, `RETURN`, `WHERE`, `WITH`, `LIMIT`, `DETACH DELETE`) pass through unchanged. Cypher-only keywords like `MERGE` or `OPTIONAL MATCH` are **not** supported and will produce a clear error message from the query engine.
+- **One statement per call.** Text with several statements separated by `;` is refused before it runs (a trailing `;` is fine). Chain clauses instead (`INSERT ... INSERT ...`, `MATCH ... INSERT ...`) or send separate calls.
+- **Parameters.** Pass values in `params` and reference them as `$name`, e.g. query `MERGE (p:Person {name: $name}) SET p += $props RETURN id(p)` with `params={"name": "Ada", "props": {"born": 1815}}`. A parameter the query uses but `params` lacks is reported by name.
+- **Write counters.** Results of writing queries include `counters` (nodes, edges, properties and labels created, deleted, set or removed).
+- **Embeddings.** Store vectors through a parameter (`INSERT (:Doc {emb: $emb})`) or `vector([...])`: grafeo 0.5.44 stores a plain list literal as a list, which vector indexes skip. `create_node`, `batch_import` and `update_node` store lists of floats as vectors.
+
+## Errors
+
+Every tool returns a string. A failure is a single message of the form `Error: <tool>: <what went wrong>. Hint: <what to try next>`, with the engine's own message included unchanged; over MCP it is returned with `isError: true`. Successful results are JSON, except the confirmation sentences of `delete_node`, `delete_edge`, `create_vector_index` and `create_text_index`.
+
+## Output size
+
+Results that would exceed about 8,000 characters are cut down to valid JSON: entries are dropped from the end of the largest lists, long strings end with `... [N chars]`, and the result gets `truncated: true`, an `omitted` map (path to number of entries dropped) and a `note`. A tool that normally returns a JSON array (`vector_search`, `mmr_search`, `search_text`) then returns `{"results": [...], "truncated": true, ...}`. Embedding properties longer than 32 values are left out of node summaries. `execute_gql`, `search_nodes_by_label` and `get_neighbors` are bounded by their `limit` instead.
 
 ## Development
 
@@ -229,9 +254,16 @@ uv run ruff format .   # Format
 uv run ty check        # Type check
 ```
 
+`tests/test_grafeo_contract.py` pins every grafeo behavior the tools rely on, so a grafeo release that changes one fails with a message naming it. To try the newest grafeo release (pre-releases included):
+
+```bash
+uv sync --upgrade-package grafeo --prerelease allow
+uv run --no-sync pytest
+```
+
 ## See Also
 
-- **[grafeo-memory](https://github.com/GrafeoDB/grafeo-memory)** includes a built-in MCP server (`grafeo-memory-mcp`) that wraps the high-level memory API — extract, reconcile, search, summarize. If you need AI memory management rather than raw graph access, use `uv add grafeo-memory[mcp]`.
+- **[grafeo-memory](https://github.com/GrafeoDB/grafeo-memory)** includes a built-in MCP server (`grafeo-memory-mcp`) that wraps the high-level memory API: extract, reconcile, search, summarize. If you need AI memory management rather than raw graph access, use `uv add grafeo-memory[mcp]`.
 
 ## License
 

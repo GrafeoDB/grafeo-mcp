@@ -33,3 +33,20 @@ def test_app_context_read_only():
     ctx = AppContext(db=db, read_only=True)
     assert ctx.read_only is True
     db.close()
+
+
+def test_main_selects_transport(monkeypatch):
+    import sys
+
+    from grafeo_mcp import server
+
+    calls: list[str] = []
+    monkeypatch.setattr(server.mcp, "run", lambda transport: calls.append(transport))
+    for argv, expected in (
+        (["grafeo-mcp"], "stdio"),
+        (["grafeo-mcp", "streamable-http"], "streamable-http"),
+        (["grafeo-mcp", "sse"], "sse"),
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        server.main()
+        assert calls[-1] == expected

@@ -6,8 +6,11 @@ from mcp.server.session import ServerSession
 
 from grafeo_mcp.resources._helpers import _format_value
 from grafeo_mcp.server import AppContext, mcp
+from grafeo_mcp.tools._helpers import index_overview
 
 SAMPLE_LIMIT = 3
+
+_EDGE_PATTERN_QUERY = "MATCH (a)-[r]->(b) WHERE type(r) = $edge_type RETURN labels(a) AS src, labels(b) AS dst LIMIT 5"
 
 
 def _build_label_details(db: grafeo.GrafeoDB, schema: dict) -> str:
@@ -23,10 +26,7 @@ def _build_label_details(db: grafeo.GrafeoDB, schema: dict) -> str:
         lines.append(f"  :{name} ({count} nodes)")
 
         # Sample a few nodes to discover property keys and example values
-        try:
-            samples = db.get_nodes_by_label(name, limit=SAMPLE_LIMIT)
-        except Exception:
-            samples = []
+        samples = db.get_nodes_by_label(name, limit=SAMPLE_LIMIT)
 
         if not samples:
             lines.append("    (no properties found)")
@@ -59,22 +59,18 @@ def _build_edge_details(db: grafeo.GrafeoDB, schema: dict) -> str:
         name = et["name"]
         count = et["count"]
 
-        # Query a few edges of this type to discover source->target label patterns
+        # Sample a few edges of this type to discover source->target label
+        # patterns. Rows are dicts keyed by column alias, and the edge type is
+        # passed as a parameter, never pasted into the query text.
         patterns: list[str] = []
-        try:
-            result = db.execute(f"MATCH (a)-[r:{name}]->(b) RETURN labels(a), labels(b) LIMIT 5")
-            seen: set[str] = set()
-            for row in result:
-                src_labels = row[0] if row[0] else ["?"]
-                tgt_labels = row[1] if row[1] else ["?"]
-                src_str = ":".join(str(lb) for lb in src_labels)
-                tgt_str = ":".join(str(lb) for lb in tgt_labels)
-                pattern = f"(:{src_str})-[:{name}]->(:{tgt_str})"
-                if pattern not in seen:
-                    seen.add(pattern)
-                    patterns.append(pattern)
-        except Exception:
-            pass
+        seen: set[str] = set()
+        for row in db.execute(_EDGE_PATTERN_QUERY, {"edge_type": name}):
+            src_str = ":".join(str(lb) for lb in row["src"]) if row["src"] else "?"
+            tgt_str = ":".join(str(lb) for lb in row["dst"]) if row["dst"] else "?"
+            pattern = f"(:{src_str})-[:{name}]->(:{tgt_str})"
+            if pattern not in seen:
+                seen.add(pattern)
+                patterns.append(pattern)
 
         lines.append(f"  :{name} ({count} edges)")
         if patterns:
@@ -87,36 +83,24 @@ def _build_edge_details(db: grafeo.GrafeoDB, schema: dict) -> str:
 
 
 def _build_index_details(db: grafeo.GrafeoDB, schema: dict) -> str:
-    """Build the property and vector index sections."""
-    lines: list[str] = []
-
-    # Property indexes: check each known property key
-    property_keys = schema.get("property_keys", [])
-    indexed: list[str] = []
-    for key in property_keys:
-        try:
-            if db.has_property_index(key):
-                indexed.append(key)
-        except Exception:
-            pass
-
-    lines.append("Property indexes:")
-    if indexed:
-        for key in sorted(indexed):
-            lines.append(f"  .{key} (btree)")
-    else:
+    """Build the property, vector and text index sections."""
+    overview = index_overview(db, list(schema.get("property_keys", [])))
+    lines: list[str] = ["Property indexes:"]
+    lines.extend(f"  .{key}" for key in overview["property"])
+    if not overview["property"]:
         lines.append("  (none)")
 
-    # Vector indexes: not enumerable via the current Python API, so direct
-    # agents to the tools that can manage them.
-    lines.append("")
-    lines.append("Vector indexes:")
-    lines.append("  (use graph_info tool or create_vector_index to manage)")
+    for title, kind, tool in (("Vector", "vector", "create_vector_index"), ("Text", "text", "create_text_index")):
+        lines.append("")
+        lines.append(f"{title} indexes:")
+        entries = overview[kind]
+        lines.extend(f"  :{entry['label']}.{entry['property']} ({entry['items']} indexed)" for entry in entries)
+        if not entries:
+            lines.append(f"  (none: create one with {tool})")
 
     return "\n".join(lines) + "\n"
 
 
-@mcp.resource("graph://schema")
 def graph_schema(ctx: Context[ServerSession, AppContext]) -> str:
     """Rich schema overview of the graph: node labels with properties, edge type patterns,
     indexes, and counts. Designed for AI agents to understand the graph structure before
@@ -160,7 +144,6 @@ def graph_schema(ctx: Context[ServerSession, AppContext]) -> str:
     return "\n".join(parts)
 
 
-@mcp.resource("graph://stats")
 def graph_stats(ctx: Context[ServerSession, AppContext]) -> str:
     """Performance-oriented database statistics: counts, indexes, storage size, and
     operational info. Use graph://schema for structural overview."""
@@ -204,3 +187,19 @@ def graph_stats(ctx: Context[ServerSession, AppContext]) -> str:
     parts.append("")
 
     return "\n".join(parts)
+
+
+# FastMCP turns a resource function with any parameter (even only the context)
+# into a template, and a template without URI parameters never matches a read
+# (mcp 1.26), so graph://schema and graph://stats could not be read. They are
+# registered as plain resources that fetch the request context themselves.
+
+
+@mcp.resource("graph://schema", name="graph_schema", description=graph_schema.__doc__, mime_type="text/plain")
+def _graph_schema_resource() -> str:
+    return graph_schema(mcp.get_context())
+
+
+@mcp.resource("graph://stats", name="graph_stats", description=graph_stats.__doc__, mime_type="text/plain")
+def _graph_stats_resource() -> str:
+    return graph_stats(mcp.get_context())

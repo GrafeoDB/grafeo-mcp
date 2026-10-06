@@ -40,14 +40,14 @@ class TestMalformedGql:
 
 
 class TestCreateEdgeNonExistentNodes:
-    def test_dangling_edge_succeeds(self, ctx):
-        # GrafeoDB allows dangling edges, so creating an edge to
-        # non-existent nodes should succeed (returns valid JSON)
+    def test_dangling_edge_is_refused(self, ctx):
+        # grafeo 0.5.44 refuses edges to missing nodes (earlier versions
+        # created dangling edges). The tool returns an error, not JSON.
         result = create_edge(9999, 8888, "GHOST", ctx=ctx)
-        parsed = json.loads(result)
-        assert parsed["edge_type"] == "GHOST"
-        assert parsed["source_id"] == 9999
-        assert parsed["target_id"] == 8888
+        assert result.startswith("Error: create_edge: ")
+        assert "9999" in result
+        assert "does not exist" in result
+        assert ctx.request_context.lifespan_context.db.edge_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -110,16 +110,8 @@ class TestDeleteNonExistentNode:
 
 
 class TestInvalidDirection:
-    def test_invalid_direction_returns_error_or_falls_through(self, populated_ctx):
-        # The current implementation uses an if/elif/else chain where
-        # invalid direction values fall through to the "both" branch.
-        # Verify this does not crash.
+    def test_invalid_direction_returns_error(self, populated_ctx):
+        # An unknown direction used to fall through to "both" silently.
         result = get_neighbors(0, direction="sideways", ctx=populated_ctx)
-        # Either returns valid JSON (fell through to "both") or an error
-        try:
-            parsed = json.loads(result)
-            # If it parsed, the fallback to "both" worked
-            assert "neighbors" in parsed
-        except json.JSONDecodeError:
-            # If it did not parse, it should be an error string
-            assert "error" in result.lower() or "failed" in result.lower()
+        assert result.startswith("Error: get_neighbors: direction must be")
+        assert "sideways" in result

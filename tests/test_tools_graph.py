@@ -58,12 +58,24 @@ class TestCreateEdge:
         result = json.loads(create_edge(n1["id"], n2["id"], "REL", {"weight": 1.5}, ctx=ctx))
         assert result["properties"]["weight"] == 1.5
 
-    def test_dangling_edge_allowed(self, ctx):
-        # GrafeoDB allows creating edges to non-existent nodes (dangling edges)
-        result = json.loads(create_edge(9999, 8888, "GHOST", ctx=ctx))
-        assert result["edge_type"] == "GHOST"
-        assert result["source_id"] == 9999
-        assert result["target_id"] == 8888
+    def test_dangling_edge_rejected(self, ctx):
+        # Since grafeo 0.5.44 the engine refuses edges to missing nodes (it
+        # allowed dangling edges before); the tool names the missing node.
+        result = create_edge(9999, 8888, "GHOST", ctx=ctx)
+        assert result.startswith("Error: create_edge: source node 9999 does not exist")
+        assert "search_nodes_by_label" in result
+        assert ctx.request_context.lifespan_context.db.edge_count == 0
+
+    def test_missing_target_named(self, ctx):
+        n1 = json.loads(create_node(["A"], ctx=ctx))
+        result = create_edge(n1["id"], 8888, "GHOST", ctx=ctx)
+        assert result.startswith("Error: create_edge: target node 8888 does not exist")
+
+    def test_empty_edge_type_rejected(self, ctx):
+        n1 = json.loads(create_node(["A"], ctx=ctx))
+        n2 = json.loads(create_node(["B"], ctx=ctx))
+        result = create_edge(n1["id"], n2["id"], " ", ctx=ctx)
+        assert result.startswith("Error: create_edge: edge_type must be a non-empty string")
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +139,29 @@ class TestGraphInfo:
         assert info["node_count"] == 5
         assert info["edge_count"] == 5
 
+    def test_engine_and_server_sections(self, ctx):
+        import grafeo
+
+        result = json.loads(graph_info(ctx=ctx))
+        assert result["engine"]["version"] == grafeo.__version__
+        assert "gql" in result["engine"]["features"]
+        assert result["server"] == {"read_only": False}
+
+    def test_lists_vector_text_and_property_indexes(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        db.create_node(["Doc"], {"title": "graphs", "emb": [1.0, 0.0], "slug": "a"})
+        db.create_vector_index("Doc", "emb", 2, "cosine")
+        db.create_text_index("Doc", "title")
+        db.create_property_index("slug")
+        indexes = json.loads(graph_info(ctx=ctx))["indexes"]
+        assert indexes["vector"] == [{"label": "Doc", "property": "emb", "items": 1}]
+        assert indexes["text"] == [{"label": "Doc", "property": "title", "items": 1}]
+        assert indexes["property"] == ["slug"]
+
+    def test_no_indexes(self, ctx):
+        indexes = json.loads(graph_info(ctx=ctx))["indexes"]
+        assert indexes == {"vector": [], "text": [], "property": []}
+
 
 # ---------------------------------------------------------------------------
 # get_neighbors
@@ -163,6 +198,38 @@ class TestGetNeighbors:
     def test_limit(self, populated_ctx):
         result = json.loads(get_neighbors(0, limit=1, ctx=populated_ctx))
         assert result["count"] <= 1
+
+    def test_exact_neighbors_per_direction(self, populated_ctx):
+        # Bob (1): Alice -KNOWS-> Bob, Bob -KNOWS-> Charlie, Bob -WORKS_AT-> Acme
+        out = json.loads(get_neighbors(1, direction="outgoing", ctx=populated_ctx))
+        inc = json.loads(get_neighbors(1, direction="incoming", ctx=populated_ctx))
+        both = json.loads(get_neighbors(1, ctx=populated_ctx))
+        assert sorted(n["node_id"] for n in out["neighbors"]) == [2, 3]
+        assert [n["node_id"] for n in inc["neighbors"]] == [0]
+        assert sorted(n["node_id"] for n in both["neighbors"]) == [0, 2, 3]
+
+    def test_edge_type_is_a_value_not_query_text(self, populated_ctx):
+        # Regression: edge_type used to be pasted into the query, so a crafted
+        # value could change the query (even in read-only mode).
+        injected = "KNOWS]-(b) DETACH DELETE b WITH b MATCH (a)-[r"
+        result = json.loads(get_neighbors(0, edge_type=injected, ctx=populated_ctx))
+        assert result["count"] == 0
+        assert populated_ctx.request_context.lifespan_context.db.node_count == 5
+
+    def test_edge_type_with_space(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        a = db.create_node(["A"])
+        b = db.create_node(["B"])
+        db.create_edge(a.id, b.id, "HAS PART")
+        result = json.loads(get_neighbors(a.id, edge_type="HAS PART", ctx=ctx))
+        assert [n["node_id"] for n in result["neighbors"]] == [b.id]
+
+    def test_self_loop_listed_once(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        a = db.create_node(["A"])
+        db.create_edge(a.id, a.id, "SELF")
+        result = json.loads(get_neighbors(a.id, ctx=ctx))
+        assert [n["node_id"] for n in result["neighbors"]] == [a.id]
 
 
 # ---------------------------------------------------------------------------
