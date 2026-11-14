@@ -35,6 +35,9 @@ def tt_ctx(tt_db):
 
 
 def _now() -> str:
+    """A point after every earlier commit: the engine's commit clock and this process's clock can tick
+    differently (coarse on Windows), so leave a gap before reading the time."""
+    time.sleep(0.05)
     return datetime.now(UTC).isoformat()
 
 
@@ -187,6 +190,7 @@ class TestOpenDatabaseRetention:
         try:
             assert engine_read_only is False
             db.execute("INSERT (:P)")
+            time.sleep(0.05)
             point = datetime.now(UTC)
             time.sleep(0.05)
             db.execute("INSERT (:P)")
@@ -204,6 +208,7 @@ class TestOpenDatabaseRetention:
         db2, _ = open_database(path, read_only=False)
         try:
             db2.execute("INSERT (:P)")
+            time.sleep(0.05)
             point = datetime.now(UTC)
             time.sleep(0.05)
             db2.execute("INSERT (:P)")
