@@ -1,17 +1,24 @@
+<picture>
+  <source media="(max-width: 556px) and (prefers-color-scheme: dark), (min-width: 768px) and (max-width: 844px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo-mcp/main/.github/readme/header-narrow-dark.svg">
+  <source media="(max-width: 556px), (min-width: 768px) and (max-width: 844px)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo-mcp/main/.github/readme/header-narrow-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo-mcp/main/.github/readme/header-dark.svg">
+  <img alt="grafeo-mcp: An MCP server that gives agents a Grafeo database: queries, search and graph algorithms." src="https://raw.githubusercontent.com/GrafeoDB/grafeo-mcp/main/.github/readme/header-light.svg" width="100%">
+</picture>
+
 [![CI](https://github.com/GrafeoDB/grafeo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo-mcp/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo-mcp/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo-mcp)
 [![PyPI](https://img.shields.io/pypi/v/grafeo-mcp.svg)](https://pypi.org/project/grafeo-mcp/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-# grafeo-mcp
-
-MCP server that exposes [GrafeoDB](https://grafeo.dev/) - an embedded graph database - to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/).
+MCP server that exposes [GrafeoDB](https://grafeo.dev/), an embedded graph database, to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/).
 
 One install, zero infrastructure. The MCP server *is* the database.
 
+grafeo-mcp is one of Grafeo's AI integrations; [grafeo.ai](https://grafeo.ai) is their front page.
+
 ## Features
 
-- **23 tools** - graph CRUD, GQL queries, batch import, full-text search, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
+- **25 tools** - graph CRUD, GQL queries, time-travel reads, batch import, full-text search, vector search, MMR, hybrid retrieval, PageRank, Dijkstra, Louvain and more
 - **3 resources** - `graph://schema`, `graph://stats`, `graph://nodes/{id}`
 - **4 workflow prompts** - guide agents through exploration, knowledge extraction, graph analysis and similarity search
 - **GQL with Cypher-style syntax** - `CREATE`, `MERGE` and `OPTIONAL MATCH` run as written, with query parameters and write counters
@@ -30,7 +37,7 @@ uv tool install grafeo-mcp
 uvx grafeo-mcp
 ```
 
-grafeo-mcp needs grafeo 0.5.44 or later (below 0.7); see [Storage and upgrading](#storage-and-upgrading).
+grafeo-mcp 0.3 needs Python 3.12 or later and grafeo 0.6, which installs with it. Coming from grafeo-mcp 0.2: your database is migrated to the grafeo 0.6 format on the first start, see [Upgrading from grafeo-mcp 0.2](#upgrading-from-grafeo-mcp-02-grafeo-05).
 
 ### Claude Desktop
 
@@ -93,21 +100,48 @@ grafeo-mcp streamable-http
 
 ## Environment Variables
 
-| Variable           | Description                                                                                | Default   |
-| ------------------ | ------------------------------------------------------------------------------------------ | --------- |
-| `GRAFEO_DB_PATH`   | Path to the database. Use a `.grafeo` file; it is created if it doesn't exist              | In-memory |
-| `GRAFEO_READ_ONLY` | `1`, `true`, `yes` or `on` disables every write (mutation tools and writing `execute_gql`) | Off       |
+| Variable                   | Description                                                                                                                       | Default                                       |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `GRAFEO_DB_PATH`           | Path to the database file (such as `graph.grafeo`); it is created if nothing exists there                                         | In-memory                                     |
+| `GRAFEO_READ_ONLY`         | `1`, `true`, `yes` or `on` disables every write (mutation tools and writing `execute_gql`)                                        | Off                                           |
+| `GRAFEO_HISTORY_RETENTION` | How far back the database keeps history for `query_as_of` and `get_node_as_of`: `off`, `forever` or a number of seconds (above 0) | The stored setting (`off` for a new database) |
+
+A database file stores its history retention, so the setting stays in effect on later starts without the variable. A read-only server keeps the setting stored in the existing database.
 
 ### Read-only mode
 
-With `GRAFEO_READ_ONLY=1` the mutation tools stay visible but return an error, and `execute_gql` refuses queries with `INSERT`, `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DROP` or `ALTER` and runs the rest in a transaction that is always rolled back. When `GRAFEO_DB_PATH` names an existing `.grafeo` file, the server also opens it with grafeo's read-only mode: the engine itself rejects writes, several read-only servers can share the file, and grafeo 0.6 reads a 0.5.x file without migrating it.
+With `GRAFEO_READ_ONLY=1` the mutation tools stay visible but return an error, and `execute_gql` refuses queries with `INSERT`, `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `DROP` or `ALTER` and runs the rest in a transaction that is always rolled back. When `GRAFEO_DB_PATH` names an existing database, the server also opens it with grafeo's read-only mode: the engine itself rejects writes, several read-only servers can share the file, and a grafeo 0.5.x database is read without migrating it.
 
 ## Storage and upgrading
 
-- **Use a single-file `.grafeo` path.** Any other path (such as `graph.db`) creates a WAL-directory database. grafeo 0.5.x reopens a directory database without its vector, text and property indexes, so `vector_search` and `search_text` fail after a restart until the index is created again; the server logs a warning for such paths. The single file is grafeo's recommended format, and WAL-directory storage is deprecated as of grafeo 0.6.
-- **One writer at a time.** A database file can be open for writing by one process. Run one grafeo-mcp server per file, or use read-only mode for extra readers.
-- **Upgrading to grafeo 0.6.** grafeo 0.6.0 writes a new file format. The first read-write open of a 0.5.x `.grafeo` file migrates it in place and keeps the old file next to it as `graph.grafeo.pre-0.6` (and its WAL as `graph.grafeo.pre-0.6.wal`). Before the first start on 0.6, stop every 0.5.x process that uses the file and make sure there is free disk space for a copy of the database. After the migration grafeo 0.5.x can no longer open the file; to go back, see [Upgrading from 0.5](https://grafeo.dev/user-guide/persistence/persistent/#upgrading-from-05). A read-only server does not migrate the file. grafeo 0.7 will not read 0.5.x files, so open each database read-write with 0.6 once before moving on.
-- **Pinning.** Until grafeo 1.0 a minor release may change the file format or the API, so grafeo-mcp pins the grafeo minor versions it is tested with (currently `grafeo>=0.5.44,<0.7`). A weekly CI job runs the test suite against the newest grafeo in that range, pre-releases included.
+- **One file per database.** With grafeo 0.6 a database is always a single file at `GRAFEO_DB_PATH`, whatever its name (`.grafeo` is the convention). While the server runs, the write-ahead log lives next to it in `<path>.wal/`; a clean shutdown folds it into the file. A path that names an existing directory stops the server with an error, unless the directory is a grafeo 0.5.x database (see below): name a file inside it instead, such as `graph.grafeo`.
+- **One writer at a time.** A database can be open for writing by one process. Run one grafeo-mcp server per database, or use read-only mode for extra readers.
+- **Backups.** Stop the server (or every process that has the database open for writing), then copy the database file. Keep the copy somewhere else than `<path>.pre-0.6`, which the migration below uses.
+- **Pinning.** Until grafeo 1.0 a minor release may change the file format or the API, so grafeo-mcp pins the grafeo minor version it is tested with (currently `grafeo>=0.6.2,<0.7`). A weekly CI job runs the test suite against the newest grafeo in that range.
+
+### Upgrading from grafeo-mcp 0.2 (grafeo 0.5)
+
+grafeo-mcp 0.3 runs on grafeo 0.6, which writes a new file format. The first read-write open of a grafeo 0.5.x database migrates it in place:
+
+1. Stop every process that uses the database: grafeo-mcp 0.2 servers and any script on grafeo 0.5.x.
+2. Back it up (the file, or the whole directory for a WAL-directory database such as `graph.db/`), and make sure there is free disk space for one more copy of the database.
+3. Upgrade: `uv tool upgrade grafeo-mcp` (or `uvx grafeo-mcp@latest`).
+4. Start the server once without `GRAFEO_READ_ONLY`. It migrates the database and logs a warning naming the copy of the original it keeps:
+   - a `.grafeo` file stays at its path in the new format; the original is kept, unchanged, as `graph.grafeo.pre-0.6` (with a WAL that still held changes as `graph.grafeo.pre-0.6.wal`);
+   - a WAL directory (0.5.x made one for a path without the `.grafeo` extension, such as `graph.db`) becomes a single file at the same path, and the directory is kept as `graph.db.pre-0.6/`. grafeo 0.5.x reopened such a database without its vector, text and property indexes; create them again with `create_vector_index` and `create_text_index`.
+5. Check the data (`graph_info`), then delete the `.pre-0.6` copy when you no longer need a way back.
+
+After the migration grafeo 0.5.x can no longer open the database; to go back, restore the `.pre-0.6` copy and use grafeo-mcp 0.2 (see [Upgrading from 0.5](https://docs.grafeo.dev/operate/persistence/persistent/#upgrading-from-05)). A read-only server reads a 0.5.x database without migrating it. grafeo 0.7 will not read 0.5.x databases, so open each one read-write with grafeo 0.6 before moving on.
+
+### What else changed with grafeo 0.6
+
+- **Exact decimals.** In GQL a number with a point (`1.5`, `0.1`) is an exact decimal: `0.1 + 0.2` is `0.3`, and `1.50` keeps its two digits. Tools return decimals as JSON numbers with their exact digits. Write `1.5e0` or `toFloat(x)` for a float.
+- **Numeric errors.** Integer or decimal overflow and division by zero fail the query instead of returning null.
+- **Sorting.** GQL `ORDER BY` puts nulls last, ascending and descending (`NULLS FIRST` changes it).
+- **Writes and filters.** A `WHERE` or `FILTER` right after `INSERT`, `CREATE`, `MERGE` or `DELETE` is an error: filter before the write, or with `WITH ... WHERE` after it.
+- **Limits.** A statement may nest 64 levels deep and a property value 128 levels.
+- **Engine messages.** Error messages from grafeo start with its error code (`GRAFEO-V001: ...`) and some are worded differently; tools pass them on unchanged after `Error: <tool>:`.
+- **`dijkstra` weights.** `dijkstra` reads exact decimal weights; a non-number, NaN, infinite or negative weight is an error.
 
 ## Tools
 
@@ -116,6 +150,15 @@ With `GRAFEO_READ_ONLY=1` the mutation tools stay visible but return an error, a
 | Tool          | Description                                            |
 | ------------- | ------------------------------------------------------ |
 | `execute_gql` | Run one GQL query, with parameters and write counters  |
+
+### Time travel
+
+Both tools read the committed state at `as_of`: seconds ago (`"300"`) or an ISO-8601 datetime with its offset (`"2026-11-09T10:00:00+00:00"`). They need history, so start the server with `GRAFEO_HISTORY_RETENTION=forever` (or a number of seconds). Both work in read-only mode.
+
+| Tool             | Description                                                 |
+| ---------------- | ----------------------------------------------------------- |
+| `query_as_of`    | Run one read-only GQL query as the database was at `as_of`  |
+| `get_node_as_of` | A node's labels and properties as they were at `as_of`      |
 
 ### Graph CRUD & Traversal
 
@@ -197,6 +240,8 @@ With `GRAFEO_READ_ONLY=1` the mutation tools stay visible but return an error, a
 | Browse nodes of a type                | `search_nodes_by_label`   | `execute_gql`            |
 | Explore one hop from a node           | `get_neighbors`           | `execute_gql`            |
 | Run a complex or multi-hop query      | `execute_gql`             | multiple `get_neighbors` |
+| See what the graph held earlier       | `query_as_of`             | `execute_gql`            |
+| Read a node as it was earlier         | `get_node_as_of`          | `get_node`               |
 | Search by keyword in text             | `search_text`             | `execute_gql`            |
 | Find similar nodes by embedding       | `vector_search`           | `execute_gql`            |
 | Find similar nodes + graph context    | `vector_graph_search`     | `vector_search` + `get_neighbors` |
@@ -213,7 +258,7 @@ The `batch_import` tool lets edges reference nodes created in the same batch usi
 batch_import(
     nodes=[
         {"labels": ["Person"], "properties": {"name": "Alice"}},  # @0
-        {"labels": ["Person"], "properties": {"name": "Bob"}},    # @1
+        {"labels": ["Person"], "properties": {"name": "Bob"}},  # @1
     ],
     edges=[
         {"source_ref": "@0", "target_ref": "@1", "edge_type": "KNOWS"},
@@ -232,7 +277,8 @@ A batch is all or nothing: it is checked completely before anything is written (
 - **One statement per call.** Text with several statements separated by `;` is refused before it runs (a trailing `;` is fine). Chain clauses instead (`INSERT ... INSERT ...`, `MATCH ... INSERT ...`) or send separate calls.
 - **Parameters.** Pass values in `params` and reference them as `$name`, e.g. query `MERGE (p:Person {name: $name}) SET p += $props RETURN id(p)` with `params={"name": "Ada", "props": {"born": 1815}}`. A parameter the query uses but `params` lacks is reported by name.
 - **Write counters.** Results of writing queries include `counters` (nodes, edges, properties and labels created, deleted, set or removed).
-- **Embeddings.** Store vectors through a parameter (`INSERT (:Doc {emb: $emb})`) or `vector([...])`: grafeo 0.5.44 stores a plain list literal as a list, which vector indexes skip. `create_node`, `batch_import` and `update_node` store lists of floats as vectors.
+- **Embeddings.** Store vectors through a parameter (`INSERT (:Doc {emb: $emb})`) or `vector([...])`: grafeo stores a plain list literal as a list, which vector indexes skip. `create_node`, `batch_import` and `update_node` store lists of floats as vectors.
+- **Numbers.** A number with a point is an exact decimal and comes back as a JSON number with its digits (`1.50`); write `1.5e0` for a float. Overflow and division by zero fail the query, and `ORDER BY` puts nulls last. See [What else changed with grafeo 0.6](#what-else-changed-with-grafeo-06).
 
 ## Errors
 

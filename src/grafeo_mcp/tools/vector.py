@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
@@ -12,33 +12,14 @@ from grafeo_mcp.tools._helpers import (
     _truncate,
     check_range,
     describe_exception,
-    first_vector_length,
     grafeo_tool,
     tool_error,
 )
 
 _INDEX_HINT = (
-    "graph_info lists the existing vector indexes under indexes.vector; create one with create_vector_index "
-    "(a WAL-directory database loses its vector indexes on restart with grafeo 0.5.x, so create it again)."
+    "graph_info lists the existing vector indexes under indexes.vector (create one with create_vector_index); "
+    "the query vector needs as many dimensions as the index, so embed it with the model that made the stored vectors."
 )
-
-
-def _query_vector_error(tool: str, db: Any, label: str, prop: str, query_vector: list[float]) -> str | None:
-    """Reject an empty query vector, or one whose length differs from the stored vectors.
-
-    A dimension mismatch makes the grafeo 0.5.x HNSW index panic, so it is
-    checked before the search reaches the engine.
-    """
-    if not query_vector:
-        return tool_error(tool, "query_vector is empty", "pass the query embedding as a list of floats.")
-    expected = first_vector_length(db, label, prop)
-    if expected is not None and expected != len(query_vector):
-        return tool_error(
-            tool,
-            f"query_vector has {len(query_vector)} dimensions but the :{label}.{prop} vectors have {expected}",
-            "embed the query with the same model that produced the stored vectors.",
-        )
-    return None
 
 
 def _hits(db: Any, results: list[tuple[int, float]]) -> list[dict[str, Any]]:
@@ -63,7 +44,7 @@ def vector_search(
     query_vector: list[float],
     k: int = 10,
     ef: int | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Find the k nearest nodes by vector similarity (HNSW index).
 
@@ -96,8 +77,6 @@ def vector_search(
         return err
     try:
         db = ctx.request_context.lifespan_context.db
-        if err := _query_vector_error("vector_search", db, label, property, query_vector):
-            return err
         return _truncate(_hits(db, db.vector_search(label, property, query_vector, k, ef)))
     except Exception as exc:
         return tool_error("vector_search", describe_exception(exc), _INDEX_HINT)
@@ -111,7 +90,7 @@ def create_vector_index(
     metric: str = "cosine",
     m: int | None = None,
     ef_construction: int | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Create an HNSW vector index for fast similarity search.
 
@@ -191,7 +170,7 @@ def mmr_search(
     fetch_k: int | None = None,
     lambda_mult: float | None = None,
     ef: int | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Find diverse nearest neighbors using Maximal Marginal Relevance (MMR).
 
@@ -232,8 +211,6 @@ def mmr_search(
         return tool_error("mmr_search", f"lambda_mult must be between 0.0 and 1.0, got {lambda_mult}")
     try:
         db = ctx.request_context.lifespan_context.db
-        if err := _query_vector_error("mmr_search", db, label, property, query_vector):
-            return err
         results = db.mmr_search(label, property, query_vector, k, fetch_k, lambda_mult, ef)
         return _truncate(_hits(db, results))
     except Exception as exc:
@@ -248,7 +225,7 @@ def vector_graph_search(
     k: int = 5,
     expand_depth: int = 1,
     expand_edge_type: str | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Hybrid search: find similar nodes by vector, then expand their graph neighborhood.
 
@@ -288,8 +265,6 @@ def vector_graph_search(
         return err
     try:
         db = ctx.request_context.lifespan_context.db
-        if err := _query_vector_error("vector_graph_search", db, label, property, query_vector):
-            return err
 
         # --- Step 1: vector search -------------------------------------------
         seeds = _hits(db, db.vector_search(label, property, query_vector, k))

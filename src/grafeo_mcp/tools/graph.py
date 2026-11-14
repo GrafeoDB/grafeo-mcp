@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import grafeo
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._helpers import (
+    _NO_HISTORY_HINT,
+    _POINT_HINT,
     _read_only_guard,
     check_range,
     describe_exception,
     grafeo_tool,
     index_overview,
+    parse_time_point,
+    to_json,
     tool_error,
 )
 
@@ -72,7 +75,7 @@ def _count_edges(db: grafeo.GrafeoDB, node_id: int) -> int:
 def create_node(
     labels: list[str],
     properties: dict[str, Any] | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Create a new node in the graph with the given labels and properties.
 
@@ -100,7 +103,7 @@ def create_node(
         return ro
     try:
         node = _db(ctx).create_node(labels, properties)
-        return json.dumps(_node_to_dict(node), default=str)
+        return to_json(_node_to_dict(node))
     except Exception as exc:
         return tool_error(
             "create_node",
@@ -115,7 +118,7 @@ def create_edge(
     target_id: int,
     edge_type: str,
     properties: dict[str, Any] | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Create a directed edge (relationship) between two existing nodes.
 
@@ -152,7 +155,7 @@ def create_edge(
             if db.get_node(node_id) is None:
                 return tool_error("create_edge", f"{role} node {node_id} does not exist", _FIND_NODE_HINT)
         edge = db.create_edge(source_id, target_id, edge_type, properties)
-        return json.dumps(_edge_to_dict(edge), default=str)
+        return to_json(_edge_to_dict(edge))
     except Exception as exc:
         return tool_error(
             "create_edge",
@@ -164,7 +167,7 @@ def create_edge(
 @grafeo_tool(read_only=True)
 def get_node(
     node_id: int,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Get a single node by its ID.
 
@@ -196,9 +199,62 @@ def get_node(
                 f"node {node_id} not found",
                 "use graph_info to check the node count, or search_nodes_by_label to find nodes.",
             )
-        return json.dumps(_node_to_dict(node), default=str)
+        return to_json(_node_to_dict(node))
     except Exception as exc:
         return tool_error("get_node", describe_exception(exc), "node_id must be a non-negative integer.")
+
+
+@grafeo_tool(read_only=True)
+def get_node_as_of(
+    node_id: int,
+    as_of: str,
+    ctx: Context[AppContext, ServerSession] | None = None,
+) -> str:
+    """Get a node as it was at an earlier point in time.
+
+    Time travel (grafeo 0.6.2 history retention): reads the committed state at
+    *as_of*. The server must keep history: start it with
+    GRAFEO_HISTORY_RETENTION=forever (or a number of seconds).
+
+    Use this tool when: you want a node's old property values, before an update
+    or delete. Do NOT use this for: the current state (use get_node).
+
+    Args:
+        node_id: The numeric node ID.
+        as_of: The point in time: seconds ago as a number ("300"), or an
+            ISO-8601 datetime with its offset ("2026-11-09T10:00:00+00:00").
+
+    Returns:
+        JSON with id, labels, and properties as they were, or an error when the
+        node did not exist at that point.
+
+    Examples:
+        get_node_as_of(0, "3600")
+        get_node_as_of(42, "2026-11-09T10:00:00+00:00")
+    """
+    assert ctx is not None
+    if err := check_range("get_node_as_of", node_id=(node_id, 0)):
+        return err
+    try:
+        point = parse_time_point(as_of)
+    except ValueError as exc:
+        return tool_error("get_node_as_of", f"as_of={as_of!r} is not a point in time: {exc}", _POINT_HINT)
+    db = _db(ctx)
+    try:
+        with db.as_of(point) as view:
+            node = view.get_node(node_id)
+        if node is None:
+            return tool_error(
+                "get_node_as_of",
+                f"node {node_id} did not exist at {as_of}",
+                "use get_node for the current state, or query_as_of to list the nodes that existed then.",
+            )
+        return to_json(_node_to_dict(node))
+    except Exception as exc:
+        hint = "node_id must be a non-negative integer."
+        if "history" in str(exc).lower():
+            hint = _NO_HISTORY_HINT
+        return tool_error("get_node_as_of", describe_exception(exc), hint)
 
 
 @grafeo_tool(read_only=True)
@@ -206,7 +262,7 @@ def search_nodes_by_label(
     label: str,
     limit: int = _MAX_LABEL_RESULTS,
     offset: int = 0,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Find nodes that have a specific label.
 
@@ -253,7 +309,7 @@ def search_nodes_by_label(
                 f"Use offset={offset + limit} to fetch the next page."
             )
 
-        return json.dumps(payload, default=str)
+        return to_json(payload)
     except Exception as exc:
         return tool_error(
             "search_nodes_by_label",
@@ -264,7 +320,7 @@ def search_nodes_by_label(
 
 @grafeo_tool(read_only=True)
 def graph_info(
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Get an overview of the graph database: counts, labels, edge types, indexes and engine.
 
@@ -300,7 +356,7 @@ def graph_info(
             "engine": {"version": build.get("version"), "features": build.get("features", [])},
             "server": {"read_only": bool(app.read_only)},
         }
-        return json.dumps(payload, default=str)
+        return to_json(payload)
     except Exception as exc:
         return tool_error("graph_info", f"could not read database info: {describe_exception(exc)}")
 
@@ -311,7 +367,7 @@ def get_neighbors(
     direction: str = "both",
     edge_type: str | None = None,
     limit: int = _MAX_NEIGHBORS,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Get neighboring nodes connected to a given node.
 
@@ -406,7 +462,7 @@ def get_neighbors(
                 "for a full traversal query."
             )
 
-        return json.dumps(payload, default=str)
+        return to_json(payload)
 
     except Exception as exc:
         return tool_error(
@@ -421,7 +477,7 @@ def update_node(
     node_id: int,
     properties: dict[str, Any],
     merge: bool = True,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Update properties on an existing node.
 
@@ -463,7 +519,7 @@ def update_node(
                     db.remove_node_property(node_id, key)
         for key, value in properties.items():
             db.set_node_property(node_id, key, value)
-        return json.dumps(_node_to_dict(db.get_node(node_id)), default=str)
+        return to_json(_node_to_dict(db.get_node(node_id)))
     except Exception as exc:
         return tool_error(
             "update_node",
@@ -476,7 +532,7 @@ def update_node(
 def delete_node(
     node_id: int,
     detach: bool = True,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Delete a node from the graph.
 
@@ -538,7 +594,7 @@ def update_edge(
     edge_id: int,
     properties: dict[str, Any],
     merge: bool = True,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Update properties on an existing edge.
 
@@ -576,7 +632,7 @@ def update_edge(
                     db.remove_edge_property(edge_id, key)
         for key, value in properties.items():
             db.set_edge_property(edge_id, key, value)
-        return json.dumps(_edge_to_dict(db.get_edge(edge_id)), default=str)
+        return to_json(_edge_to_dict(db.get_edge(edge_id)))
     except Exception as exc:
         return tool_error(
             "update_edge",
@@ -588,7 +644,7 @@ def update_edge(
 @grafeo_tool(read_only=False, destructive=True, idempotent=True)
 def delete_edge(
     edge_id: int,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Delete an edge from the graph.
 

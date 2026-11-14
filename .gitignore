@@ -39,3 +39,6 @@ htmlcov/
 *.db
 *.grafeo
 *.grafeo.*
+
+# Test fixtures: small databases written by older grafeo releases
+!tests/fixtures/**

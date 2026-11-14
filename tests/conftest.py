@@ -6,11 +6,30 @@ so tool functions can be tested without spinning up a full MCP server.
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import grafeo
 import pytest
+
+
+@asynccontextmanager
+async def client_session(server: Any, timeout_seconds: float = 30) -> AsyncGenerator[Any]:
+    """An in-memory MCP client session against *server* (mcp >= 2.2 test transport)."""
+    from mcp import ClientSession
+    from mcp.client._memory import InMemoryTransport  # mcp 2.x in-memory transport
+
+    async with (
+        InMemoryTransport(server) as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream, read_timeout_seconds=timeout_seconds) as client,
+    ):
+        await client.initialize()
+        yield client
+
 
 # ---------------------------------------------------------------------------
 # Mock MCP context chain: ctx.request_context.lifespan_context.db
@@ -30,13 +49,39 @@ class _RequestContext:
 
 @dataclass
 class MockContext:
-    """Minimal stand-in for ``Context[ServerSession, AppContext]``."""
+    """Minimal stand-in for ``Context[AppContext, ServerSession]``."""
 
     request_context: _RequestContext
 
 
 def _make_ctx(db: grafeo.GrafeoDB) -> MockContext:
     return MockContext(request_context=_RequestContext(lifespan_context=_LifespanContext(db=db)))
+
+
+# ---------------------------------------------------------------------------
+# Databases written by grafeo 0.5.44 (see fixtures/grafeo-0.5.44/make_fixtures.py)
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "grafeo-0.5.44"
+
+
+def copy_fixture(name: str, tmp_path: Path) -> Path:
+    """Copy a grafeo 0.5.44 database from tests/fixtures into *tmp_path*."""
+    source, target = FIXTURES / name, tmp_path / name
+    if source.is_dir():
+        shutil.copytree(source, target)
+    else:
+        shutil.copy2(source, target)
+    return target
+
+
+def check_fixture_data(db: grafeo.GrafeoDB) -> None:
+    """The data tests/fixtures/grafeo-0.5.44/make_fixtures.py writes."""
+    assert (db.node_count, db.edge_count) == (3, 2)
+    people = list(db.execute("MATCH (p:Person) RETURN p.name AS n, p.age AS a, p.score AS s ORDER BY n"))
+    assert people == [{"n": "Alix", "a": 30, "s": 1.5}, {"n": "Gus", "a": 25, "s": 2.25}]
+    edges = list(db.execute("MATCH (a)-[r]->(b) RETURN a.name AS a, type(r) AS t, r.since AS s ORDER BY s"))
+    assert edges == [{"a": "Alix", "t": "KNOWS", "s": 2020}, {"a": "Gus", "t": "WORKS_AT", "s": 2021}]
 
 
 # ---------------------------------------------------------------------------

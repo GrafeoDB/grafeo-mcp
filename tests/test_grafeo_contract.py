@@ -12,8 +12,12 @@ condition that raises are.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import grafeo
 import pytest
+
+from tests.conftest import FIXTURES, check_fixture_data, copy_fixture
 
 
 def _rows(result) -> list[dict]:
@@ -85,9 +89,11 @@ class TestDirectApi:
 
     def test_create_edge_to_missing_node_raises(self, db):
         a = db.create_node(["P"])
-        with pytest.raises(grafeo.GrafeoError, match="does not exist"):
+        # grafeo 0.6 says "Node not found: 4242" (0.5.44: "... does not exist");
+        # create_edge checks both endpoints itself to name the missing one.
+        with pytest.raises(grafeo.GrafeoError, match="4242"):
             db.create_edge(a.id, 4242, "KNOWS")
-        with pytest.raises(grafeo.GrafeoError, match="does not exist"):
+        with pytest.raises(grafeo.GrafeoError, match="4242"):
             db.create_edge(4242, a.id, "KNOWS")
         assert db.edge_count == 0, "a refused edge must not be created"
 
@@ -235,6 +241,24 @@ class TestQueryLanguage:
         )
         assert rows == [{"id": a.id}], "execute_gql documents MERGE ... SET p += $props as the upsert pattern"
 
+    def test_where_right_after_a_write_is_an_error(self, db):
+        with pytest.raises(grafeo.GrafeoError):
+            db.execute("INSERT (n:X {a: 1}) WHERE n.a = 1 RETURN n")
+        assert db.node_count == 0, "execute_gql documents that WHERE after INSERT/CREATE/MERGE/DELETE is refused"
+
+    def test_order_by_puts_nulls_last(self, db):
+        for order in ("ASC", "DESC"):
+            rows = _rows(db.execute(f"UNWIND [3, null, 1] AS x RETURN x ORDER BY x {order}"))
+            assert rows[-1] == {"x": None}, f"execute_gql documents that ORDER BY ... {order} puts nulls last"
+
+    def test_numbers_with_a_point_are_numbers(self, db):
+        # grafeo 0.6.0 returns 1.50 as Decimal('1.50') (0.6.0b1: the float
+        # 1.5); to_json writes either as a JSON number.
+        row = _rows(db.execute("RETURN 1.50 AS a, 0.1 + 0.2 AS b, 1.5e0 AS c, $d AS d", {"d": Decimal("2.25")}))[0]
+        assert all(isinstance(value, float | Decimal) for value in row.values()), row
+        assert (row["a"], row["c"], row["d"]) == (Decimal("1.5"), 1.5, Decimal("2.25"))
+        assert isinstance(row["c"], float), "a number with an exponent stays a float"
+
     def test_comment_and_string_rules_match_the_scanner(self, db):
         # tools/_gql.py mirrors these lexer rules to count statements and find
         # write keywords; if the engine changes them the scanner must follow.
@@ -307,10 +331,27 @@ class TestIndexesAndSearch:
         )
 
     def test_search_without_index_raises(self, db):
-        with pytest.raises(RuntimeError, match="create_vector_index"):
+        # grafeo 0.6 messages name no binding method any more (0.5.44 named
+        # create_vector_index); the tools' hints name the tool to call.
+        with pytest.raises(grafeo.GrafeoError, match="no vector index"):
             db.vector_search("Doc", "emb", [1.0], 1, None)
-        with pytest.raises(RuntimeError, match="create_text_index"):
+        with pytest.raises(grafeo.GrafeoError, match="no text index"):
             db.text_search("Doc", "title", "x", 1)
+
+    @pytest.mark.parametrize("query", [[1.0, 0.0], [], [float("nan"), 0.0, 0.0]])
+    def test_bad_query_vectors_raise_instead_of_panicking(self, docs, query):
+        # 0.5.x panicked on a query vector of the wrong size, so the vector
+        # tools compared it with a stored vector first. 0.6 refuses it (and an
+        # empty or non-finite one) with an error, and the tools pass that on.
+        with pytest.raises(grafeo.GrafeoError, match="query vector"):
+            docs.vector_search("Doc", "emb", query, 2, None)
+        with pytest.raises(grafeo.GrafeoError, match="query vector"):
+            docs.mmr_search("Doc", "emb", query, 2, None, None, None)
+        assert len(docs.vector_search("Doc", "emb", [1.0, 0.0, 0.0], 2, None)) == 2, "the database keeps answering"
+
+    def test_wrong_size_message_names_both_sizes(self, docs):
+        with pytest.raises(grafeo.GrafeoError, match=r"2 dimensions.*expects 3"):
+            docs.vector_search("Doc", "emb", [1.0, 0.0], 2, None)
 
     def test_vector_index_needs_dimensions_without_data(self, db):
         with pytest.raises(RuntimeError, match="dimensions"):
@@ -351,6 +392,17 @@ class TestAlgorithms:
         assert db.algorithms.dijkstra(source=a.id, target=4242) is None, (
             "dijkstra returns None for a missing node, so the tool checks node existence itself"
         )
+
+    def test_dijkstra_reads_decimal_weights(self, db):
+        # grafeo 0.6.2's weighted algorithms read a decimal weight's value (0.6.0
+        # counted it as 1.0, which tools/algorithms.py's _has_decimal_weights
+        # refused; that check is gone now).
+        db.execute("INSERT (:P {n: 'a'})-[:R {w: 2.5}]->(:P {n: 'b'})-[:R {w: 0.5}]->(:P {n: 'c'})")
+        weights = [row["w"] for row in db.execute("MATCH ()-[r:R]->() RETURN r.w AS w ORDER BY w DESC")]
+        assert weights == [Decimal("2.5"), Decimal("0.5")]
+        distance, path = db.algorithms.dijkstra(source=0, target=2, weight="w")
+        assert path == [0, 1, 2]
+        assert distance == 3.0
 
     def test_louvain_numbering_is_deterministic(self, db):
         for _ in range(3):
@@ -405,10 +457,158 @@ class TestPersistence:
         finally:
             ro.close()
 
-    def test_open_read_only_needs_an_existing_single_file(self, tmp_path):
+    def test_open_read_only_needs_an_existing_database(self, tmp_path):
         with pytest.raises(grafeo.GrafeoError):
             grafeo.GrafeoDB.open_read_only(str(tmp_path / "missing.grafeo"))
-        directory = str(tmp_path / "graph.db")
-        grafeo.GrafeoDB(directory).close()
+        empty = tmp_path / "empty"
+        empty.mkdir()
         with pytest.raises(grafeo.GrafeoError):
-            grafeo.GrafeoDB.open_read_only(directory)
+            grafeo.GrafeoDB.open_read_only(str(empty))
+        # Any existing database opens read-only, whatever its extension.
+        path = str(tmp_path / "graph.db")
+        grafeo.GrafeoDB(path).close()
+        ro = grafeo.GrafeoDB.open_read_only(path)
+        try:
+            with pytest.raises(grafeo.GrafeoError):
+                ro.create_node(["X"])
+        finally:
+            ro.close()
+
+
+# ---------------------------------------------------------------------------
+# grafeo 0.6 storage: single files, and the migration of 0.5.x databases
+# ---------------------------------------------------------------------------
+
+
+class TestSingleFileStorage:
+    @pytest.mark.parametrize("name", ["graph.grafeo", "graph.db", "graph"])
+    def test_every_database_is_one_file_with_a_wal_sidecar(self, tmp_path, name):
+        path = tmp_path / name
+        db = grafeo.GrafeoDB(str(path))
+        db.create_node(["P"])
+        assert path.is_file(), "grafeo 0.6 writes a single file whatever the extension (0.5.x: a WAL directory)"
+        assert (tmp_path / f"{name}.wal").is_dir(), "the WAL lives in <path>.wal/ while the database is open"
+        db.close()
+        assert sorted(p.name for p in tmp_path.iterdir()) == [name], "close() folds the WAL into the file"
+
+    def test_an_empty_directory_is_refused(self, tmp_path):
+        with pytest.raises(grafeo.GrafeoError):
+            grafeo.GrafeoDB(str(tmp_path))
+        assert list(tmp_path.iterdir()) == [], "a refused open changes nothing"
+
+    def test_a_second_writer_is_refused(self, tmp_path):
+        path = str(tmp_path / "graph.grafeo")
+        holder = grafeo.GrafeoDB(path)
+        try:
+            with pytest.raises(grafeo.GrafeoError):
+                grafeo.GrafeoDB(path)
+        finally:
+            holder.close()
+
+
+class TestMigrationFrom05:
+    """Databases written by grafeo 0.5.44 (tests/fixtures/grafeo-0.5.44)."""
+
+    def test_single_file_migrates_and_keeps_the_original(self, tmp_path):
+        path = copy_fixture("graph.grafeo", tmp_path)
+        db = grafeo.GrafeoDB(str(path))
+        try:
+            check_fixture_data(db)
+            assert db.vector_search("Person", "emb", [1.0, 0.0, 0.0], 1, None)[0][0] == 0
+            assert db.text_search("Company", "bio", "graph", 1)[0][0] == 2
+            assert db.has_property_index("name")
+        finally:
+            db.close()
+        backup = tmp_path / "graph.grafeo.pre-0.6"
+        assert backup.read_bytes() == (FIXTURES / "graph.grafeo").read_bytes(), "the 0.5.x file is kept unchanged"
+        assert path.read_bytes() != backup.read_bytes(), "the database itself is in the 0.6 format now"
+        db = grafeo.GrafeoDB(str(path))  # a second open finds a 0.6 file
+        try:
+            check_fixture_data(db)
+        finally:
+            db.close()
+
+    def test_wal_directory_migrates_to_a_file(self, tmp_path):
+        path = copy_fixture("graph-waldir", tmp_path)
+        db = grafeo.GrafeoDB(str(path))
+        try:
+            check_fixture_data(db)
+        finally:
+            db.close()
+        assert path.is_file(), "the WAL directory becomes a single file at the same path"
+        kept = tmp_path / "graph-waldir.pre-0.6" / "wal" / "wal_00000000.log"
+        assert kept.read_bytes() == (FIXTURES / "graph-waldir" / "wal" / "wal_00000000.log").read_bytes()
+
+    @pytest.mark.parametrize("name", ["graph.grafeo", "graph-waldir"])
+    def test_read_only_open_does_not_migrate(self, tmp_path, name):
+        path = copy_fixture(name, tmp_path)
+        db = grafeo.GrafeoDB.open_read_only(str(path))
+        try:
+            check_fixture_data(db)
+        finally:
+            db.close()
+        assert not (tmp_path / f"{name}.pre-0.6").exists(), "a read-only open leaves a 0.5.x database as it is"
+
+
+# ---------------------------------------------------------------------------
+# grafeo 0.6.2 type rules
+# ---------------------------------------------------------------------------
+
+
+class Test062TypeRules:
+    """0.6.2: a string never equals a number, an operator given a value of the
+    wrong kind raises instead of answering null, procedure arguments are
+    validated, and a list containing a null compares as unknown in a WHERE."""
+
+    def test_string_never_equals_number(self, db):
+        assert list(db.execute("RETURN '5' = 5 AS eq, '5' <> 5 AS neq")) == [{"eq": False, "neq": True}]
+        db.execute("INSERT (:P {n: 5})")
+        assert list(db.execute("MATCH (x) WHERE id(x) = '5' RETURN x")) == []
+
+    def test_wrong_kind_operand_raises(self, db):
+        with pytest.raises(grafeo.GrafeoError, match="invalid value type"):
+            db.execute("RETURN true + 1 AS x")
+        with pytest.raises(grafeo.GrafeoError, match="invalid value type"):
+            db.execute("RETURN [1, 2, 3][1.5] AS x")
+        with pytest.raises(grafeo.GrafeoError, match="invalid value type"):
+            db.execute("RETURN -'a' AS x")
+
+    def test_procedure_argument_out_of_range_raises(self, db):
+        db.execute("INSERT (:P), (:P)")
+        with pytest.raises(grafeo.GrafeoError, match="damping"):
+            db.algorithms.pagerank(2.0, 100, 1e-6)
+
+    def test_list_with_null_compares_as_unknown(self, db):
+        db.execute("INSERT (:T {v: [null]}), (:U {v: [1, 2]})")
+        assert list(db.execute("MATCH (n) WHERE n.v = [null] RETURN labels(n) AS l")) == []
+        assert list(db.execute("MATCH (n) WHERE n.v = [1, 2] RETURN labels(n) AS l")) == [{"l": ["U"]}]
+        # DISTINCT and grouping still treat nulls as one value.
+        assert list(db.execute("MATCH (n) RETURN DISTINCT n.v AS v")) == [{"v": [None]}, {"v": [1, 2]}]
+
+    def test_weighted_algorithm_refuses_a_non_number_weight(self, db):
+        a = db.create_node(["P"], {})
+        b = db.create_node(["P"], {})
+        db.create_edge(a.id, b.id, "E", {"w": "heavy"})
+        with pytest.raises(grafeo.GrafeoError):
+            db.algorithms.dijkstra(source=a.id, target=b.id, weight="w")
+
+
+class Test062ToolSurface:
+    """The tools surface the 0.6.2 errors as their own error contract."""
+
+    def test_execute_gql_reports_wrong_kind_operand(self, ctx):
+        from grafeo_mcp.tools.query import execute_gql
+
+        result = execute_gql("RETURN true + 1 AS x", ctx=ctx)
+        assert result.startswith("Error: execute_gql:")
+        assert "invalid value type" in result
+
+    def test_dijkstra_reports_a_non_number_weight(self, ctx):
+        from grafeo_mcp.tools.algorithms import dijkstra
+
+        db = ctx.request_context.lifespan_context.db
+        a = db.create_node(["P"], {})
+        b = db.create_node(["P"], {})
+        db.create_edge(a.id, b.id, "E", {"w": "heavy"})
+        result = dijkstra(a.id, b.id, weight_property="w", ctx=ctx)
+        assert result.startswith("Error: dijkstra:")

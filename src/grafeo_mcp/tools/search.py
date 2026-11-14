@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
@@ -31,7 +31,7 @@ _MAX_SEARCH_RESULTS = 20
 def create_text_index(
     label: str,
     property: str,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Create a full-text search index on a string property.
 
@@ -70,7 +70,7 @@ def search_text(
     property: str,
     query: str,
     limit: int = _MAX_SEARCH_RESULTS,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Full-text keyword search (BM25) over string properties.
 

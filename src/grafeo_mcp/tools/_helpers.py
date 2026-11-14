@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import functools
 import json
+import re
+import uuid
 from collections.abc import Callable
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
@@ -48,6 +52,34 @@ def _is_engine_panic(exc: BaseException) -> bool:
     catch it and, uncaught, it takes the whole MCP server down.
     """
     return type(exc).__name__ == "PanicException"
+
+
+_POINT_HINT = (
+    'a number is seconds ago ("300" = 5 minutes ago), or an ISO-8601 datetime with its offset '
+    '("2026-11-09T10:00:00+00:00").'
+)
+
+_NO_HISTORY_HINT = (
+    "the database keeps no history for time-travel reads: start the server with "
+    "GRAFEO_HISTORY_RETENTION=forever (or a number of seconds) to enable them."
+)
+
+
+def parse_time_point(as_of: str) -> timedelta | datetime:
+    """Parse an ``as_of`` point: seconds ago as a number, or an aware ISO-8601 datetime."""
+    text = as_of.strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if seconds <= 0:
+            raise ValueError("seconds ago must be positive")
+        return timedelta(seconds=seconds)
+    point = datetime.fromisoformat(text)
+    if point.tzinfo is None or point.utcoffset() is None:
+        raise ValueError("the datetime needs its UTC offset, e.g. 2026-11-09T10:00:00+00:00")
+    return point
 
 
 def describe_exception(exc: BaseException) -> str:
@@ -105,10 +137,10 @@ def grafeo_tool(
             effect (``idempotentHint``).
     """
     annotations = ToolAnnotations(
-        readOnlyHint=read_only,
-        destructiveHint=None if read_only else destructive,
-        idempotentHint=None if read_only else idempotent,
-        openWorldHint=False,
+        read_only_hint=read_only,
+        destructive_hint=None if read_only else destructive,
+        idempotent_hint=None if read_only else idempotent,
+        open_world_hint=False,
     )
 
     def decorator(fn: Callable[..., str]) -> Callable[..., str]:
@@ -120,8 +152,8 @@ def grafeo_tool(
             if is_error(result):
                 return CallToolResult(
                     content=[TextContent(type="text", text=result)],
-                    structuredContent={"result": result},
-                    isError=True,
+                    structured_content={"result": result},
+                    is_error=True,
                 )
             return result
 
@@ -167,8 +199,34 @@ spent on thousands of rows or embedding values."""
 _STRING_LIMITS = (1_000, 200, 60)
 
 
+# grafeo 0.6 returns exact decimals (a GQL number with a point, such as 1.50,
+# or a DECIMAL property) as ``decimal.Decimal``. The json module cannot write a
+# Decimal as a number, so the encoder writes a marked string and to_json turns
+# it back into a bare JSON number with the decimal's own digits: 1.50 stays
+# 1.50 and 0.1 + 0.2 is 0.3, not a string and not a rounded float.
+_DECIMAL_MARK = f"\x00grafeo-mcp-decimal-{uuid.uuid4().hex}:"
+_DECIMAL_TOKEN = re.compile('"' + re.escape(json.dumps(_DECIMAL_MARK)[1:-1]) + r'([-+0-9.eE]+)"')
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Decimal) and value.is_finite():
+        return f"{_DECIMAL_MARK}{value}"
+    return str(value)
+
+
+def to_json(payload: Any, *, compact: bool = False) -> str:
+    """Serialise a tool result to JSON.
+
+    Decimals become JSON numbers that keep their digits; other values JSON
+    cannot hold (dates, times, durations) become their text.
+    """
+    separators = (",", ":") if compact else None
+    text = json.dumps(payload, default=_json_default, separators=separators)
+    return _DECIMAL_TOKEN.sub(r"\1", text)
+
+
 def _dumps(payload: Any) -> str:
-    return json.dumps(payload, default=str, separators=(",", ":"))
+    return to_json(payload, compact=True)
 
 
 _META_KEYS = frozenset({"truncated", "omitted", "note"})
@@ -265,7 +323,9 @@ def _truncate(payload: Any, *, limit: int = _MAX_RESULT_CHARS) -> str:
         return text
 
     original_chars = len(text)
-    work: dict[str, Any] = json.loads(text) if isinstance(payload, dict) else {"results": json.loads(text)}
+    # parse_float=Decimal keeps every number's digits through the round trip.
+    parsed = json.loads(text, parse_float=Decimal)
+    work: dict[str, Any] = parsed if isinstance(payload, dict) else {"results": parsed}
     omitted: dict[str, int] = {}
     work["truncated"] = True
     work["omitted"] = omitted
@@ -337,12 +397,3 @@ def index_overview(db: Any, property_keys: list[str] | None = None) -> dict[str,
     keys = property_keys if property_keys is not None else list(db.schema().get("property_keys", []))
     overview["property"] = sorted(key for key in keys if db.has_property_index(key))
     return overview
-
-
-def first_vector_length(db: Any, label: str, prop: str, *, sample: int = 20) -> int | None:
-    """Length of the first list value of *prop* among a few *label* nodes, if any."""
-    for _node_id, props in db.get_nodes_by_label(label, limit=sample):
-        value = props.get(prop)
-        if isinstance(value, list) and value:
-            return len(value)
-    return None

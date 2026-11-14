@@ -7,23 +7,23 @@ result conversion) instead of calling the tool functions directly.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import timedelta
 
 import pytest
 from mcp import ClientSession
-from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import CallToolResult, TextContent, TextResourceContents
-from pydantic import AnyUrl
 
 from grafeo_mcp.server import mcp
+from tests.conftest import client_session
 
 EXPECTED_TOOLS = {
     "execute_gql",
+    "query_as_of",
     "create_node",
     "create_edge",
     "get_node",
+    "get_node_as_of",
     "search_nodes_by_label",
     "graph_info",
     "get_neighbors",
@@ -47,6 +47,8 @@ EXPECTED_TOOLS = {
 
 READ_ONLY_TOOLS = {
     "get_node",
+    "get_node_as_of",
+    "query_as_of",
     "search_nodes_by_label",
     "graph_info",
     "get_neighbors",
@@ -71,8 +73,8 @@ def _in_memory_server(monkeypatch):
 
 
 @asynccontextmanager
-async def _client() -> AsyncIterator[ClientSession]:
-    async with create_connected_server_and_client_session(mcp, read_timeout_seconds=timedelta(seconds=30)) as client:
+async def _client() -> AsyncGenerator[ClientSession]:
+    async with client_session(mcp) as client:
         yield client
 
 
@@ -86,13 +88,13 @@ def _text(result: CallToolResult) -> str:
 async def _ok(client: ClientSession, tool: str, **arguments) -> str:
     result = await client.call_tool(tool, arguments)
     text = _text(result)
-    assert result.isError is False, text
-    assert result.structuredContent == {"result": text}
+    assert result.is_error is False, text
+    assert result.structured_content == {"result": text}
     return text
 
 
 async def _resource(client: ClientSession, uri: str) -> str:
-    contents = (await client.read_resource(AnyUrl(uri))).contents
+    contents = (await client.read_resource(uri)).contents
     assert len(contents) == 1 and isinstance(contents[0], TextResourceContents)
     return contents[0].text
 
@@ -100,7 +102,7 @@ async def _resource(client: ClientSession, uri: str) -> str:
 async def _error(client: ClientSession, tool: str, **arguments) -> str:
     result = await client.call_tool(tool, arguments)
     text = _text(result)
-    assert result.isError is True, text
+    assert result.is_error is True, text
     return text
 
 
@@ -120,10 +122,10 @@ class TestToolListing:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         for name, tool in tools.items():
             assert tool.annotations is not None, name
-            assert tool.annotations.readOnlyHint is (name in READ_ONLY_TOOLS), name
-            assert tool.annotations.openWorldHint is False, name
+            assert tool.annotations.read_only_hint is (name in READ_ONLY_TOOLS), name
+            assert tool.annotations.open_world_hint is False, name
             if name not in READ_ONLY_TOOLS:
-                assert tool.annotations.destructiveHint is (name in DESTRUCTIVE_TOOLS), name
+                assert tool.annotations.destructive_hint is (name in DESTRUCTIVE_TOOLS), name
 
     async def test_descriptions_are_agent_ready(self):
         async with _client() as client:
@@ -137,9 +139,9 @@ class TestToolListing:
     async def test_execute_gql_schema_has_params(self):
         async with _client() as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-        properties = tools["execute_gql"].inputSchema["properties"]
+        properties = tools["execute_gql"].input_schema["properties"]
         assert set(properties) == {"query", "limit", "params"}
-        assert tools["execute_gql"].inputSchema["required"] == ["query"]
+        assert tools["execute_gql"].input_schema["required"] == ["query"]
 
 
 # ---------------------------------------------------------------------------
@@ -186,13 +188,13 @@ class TestToolCalls:
     async def test_invalid_arguments_are_flagged(self):
         async with _client() as client:
             result = await client.call_tool("get_node", {"node_id": "not-a-number"})
-            assert result.isError is True
+            assert result.is_error is True
 
     async def test_engine_panic_does_not_stop_the_server(self):
         # A query vector of the wrong size made the 0.5.x HNSW index panic, and
-        # the panic (a BaseException) closed the MCP connection. The tool now
-        # checks the size first; when it cannot see a stored vector, the panic
-        # guard turns the panic into an error result instead.
+        # the panic (a BaseException) closed the MCP connection. grafeo 0.6
+        # refuses it with an error instead; the panic guard stays for any
+        # other engine panic.
         async with _client() as client:
             await _ok(client, "execute_gql", query="UNWIND range(1, 25) AS i INSERT (:Doc {i: i})")
             await _ok(client, "execute_gql", query="INSERT (:Doc {emb: $emb})", params={"emb": [1.0, 0.0, 0.0]})
@@ -226,7 +228,7 @@ class TestResourcesAndPrompts:
     async def test_resources_are_listed(self):
         async with _client() as client:
             resources = {str(resource.uri) for resource in (await client.list_resources()).resources}
-            templates = {t.uriTemplate for t in (await client.list_resource_templates()).resourceTemplates}
+            templates = {t.uri_template for t in (await client.list_resource_templates()).resource_templates}
         assert resources == {"graph://schema", "graph://stats"}
         assert templates == {"graph://nodes/{node_id}"}
 
