@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 import grafeo
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.resources._helpers import _format_value
@@ -46,7 +46,7 @@ def _build_connection_summary(db: grafeo.GrafeoDB, node_id: int) -> str:
     return "\n".join(parts)
 
 
-def get_node_resource(node_id: str, ctx: Context[ServerSession, AppContext]) -> str:
+def get_node_resource(node_id: str, ctx: Context[AppContext, ServerSession]) -> str:
     """Full details for a specific node: properties, labels, and a summary of its
     connections (edge types and counts). Gives an AI agent context about a node
     without needing separate neighbor queries."""
@@ -87,14 +87,12 @@ def get_node_resource(node_id: str, ctx: Context[ServerSession, AppContext]) -> 
     return "\n".join(parts)
 
 
-# FastMCP validates template arguments with pydantic, which rebuilds a
-# Context[ServerSession, AppContext] argument without its request (mcp 1.26),
-# so a template that takes ctx fails on every read. The registered function
-# takes only the URI parameter and fetches the request context itself.
+# The registered template function takes the Context argument directly (mcp
+# 2.x passes it through); mcp 1.x rebuilt it with pydantic and lost the request.
 
 
 @mcp.resource(
     "graph://nodes/{node_id}", name="get_node_resource", description=get_node_resource.__doc__, mime_type="text/plain"
 )
-def _node_resource(node_id: str) -> str:
-    return get_node_resource(node_id, mcp.get_context())
+def _node_resource(node_id: str, ctx: Context[AppContext, ServerSession]) -> str:
+    return get_node_resource(node_id, ctx)

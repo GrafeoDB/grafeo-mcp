@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import itertools
-import json
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._gql import scan_query
-from grafeo_mcp.tools._helpers import check_range, describe_exception, grafeo_tool, tool_error
+from grafeo_mcp.tools._helpers import (
+    _NO_HISTORY_HINT,
+    _POINT_HINT,
+    check_range,
+    describe_exception,
+    grafeo_tool,
+    parse_time_point,
+    to_json,
+    tool_error,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +56,7 @@ def _format_results(result: Any, *, limit: int, include_counters: bool = False) 
     if result.execution_time_ms is not None:
         payload["execution_time_ms"] = round(result.execution_time_ms, 2)
 
-    return json.dumps(payload, default=str)
+    return to_json(payload)
 
 
 def _run_read_only(db: Any, query: str, params: dict[str, Any] | None) -> tuple[Any, bool]:
@@ -77,7 +85,7 @@ def execute_gql(
     query: str,
     limit: int = _MAX_RESULT_ROWS,
     params: dict[str, Any] | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Execute one GQL query against the graph database.
 
@@ -105,6 +113,16 @@ def execute_gql(
         - Store embeddings through params ("INSERT (:Doc {emb: $emb})") or
           vector([...]): a plain list literal in the query text is stored as
           a list, which vector indexes skip.
+        - A number with a point (1.5, 0.1) is an exact decimal: 0.1 + 0.2
+          is 0.3 and 1.50 keeps its two digits. Write 1.5e0 or toFloat(x)
+          for a float. Integer or decimal overflow and division by zero
+          fail the query instead of returning null.
+        - ORDER BY puts nulls last, ascending and descending; add NULLS
+          FIRST to change that.
+        - Put a filter before a write (MATCH ... WHERE ... SET ...): a
+          WHERE or FILTER right after INSERT, CREATE, MERGE or DELETE is a
+          syntax error. To filter the written rows, add WITH ... WHERE
+          after the write.
         - In read-only mode (GRAFEO_READ_ONLY=1) only reading queries run;
           queries with INSERT, CREATE, MERGE, SET, REMOVE, DELETE, DROP or
           ALTER are refused.
@@ -118,7 +136,8 @@ def execute_gql(
     Returns:
         JSON with columns, rows (each row maps column name to value; nodes
         and edges appear as maps with _id, _labels or _type, and their
-        properties), total_rows, counters (nodes/edges/properties/labels
+        properties; decimals are JSON numbers with their exact digits),
+        total_rows, counters (nodes/edges/properties/labels
         created, deleted, set or removed) when the query wrote anything, and
         truncated/note when rows were left out.
 
@@ -180,3 +199,85 @@ def execute_gql(
         return _format_results(result, limit=limit, include_counters=scan.writes)
     except Exception as exc:
         return tool_error("execute_gql", f"query failed: {describe_exception(exc)}", _QUERY_HINT)
+
+
+@grafeo_tool(read_only=True)
+def query_as_of(
+    query: str,
+    as_of: str,
+    limit: int = _MAX_RESULT_ROWS,
+    params: dict[str, Any] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
+) -> str:
+    """Run one read-only GQL query as the database was at an earlier point in time.
+
+    Time travel (grafeo 0.6.2 history retention): the query sees the committed
+    state at *as_of* and cannot write. The server must keep history for this:
+    start it with GRAFEO_HISTORY_RETENTION=forever (or a number of seconds).
+
+    Use this tool when: you need to know what the graph held earlier, e.g. what
+    a node said before an update, or which nodes existed an hour ago.
+    Do NOT use this for: current-state queries (use execute_gql).
+
+    Rules: the same as execute_gql (one statement, params for values), and the
+    query must not write: a time-travel read is read-only.
+
+    Args:
+        query: One read-only GQL statement, e.g. MATCH (p:Person) RETURN p.name.
+        as_of: The point in time: seconds ago as a number ("300" = 5 minutes
+            ago), or an ISO-8601 datetime with its offset
+            ("2026-11-09T10:00:00+00:00").
+        limit: Maximum rows to return (default 100).
+        params: Optional query parameters, referenced as $name in the query.
+
+    Returns:
+        JSON with columns, rows, total_rows and truncated/note, as execute_gql
+        returns for a read.
+
+    Examples:
+        query_as_of("MATCH (p:Person) RETURN p.name, p.age", "3600")
+        query_as_of("MATCH (n) RETURN count(n) AS c", "2026-11-09T10:00:00+00:00")
+    """
+    assert ctx is not None
+    if err := check_range("query_as_of", limit=(limit, 1)):
+        return err
+
+    scan = scan_query(query)
+    if scan.statements == 0:
+        return tool_error(
+            "query_as_of", "the query is empty", "send one GQL statement, e.g. MATCH (n) RETURN n LIMIT 10."
+        )
+    if scan.statements > 1:
+        return tool_error(
+            "query_as_of",
+            f"the query holds {scan.statements} statements separated by ';', but one runs per call",
+            "send each statement in its own query_as_of call.",
+        )
+    if scan.writes:
+        return tool_error(
+            "query_as_of",
+            "the query writes (" + ", ".join(scan.write_keywords) + "), but a time-travel read cannot write",
+            "run writes with execute_gql against the current state.",
+        )
+    missing = sorted(scan.parameters - set(params or {}))
+    if missing:
+        names = ", ".join(f"${name}" for name in missing)
+        return tool_error(
+            "query_as_of",
+            f"the query uses {names}, but params does not supply {'it' if len(missing) == 1 else 'them'}",
+            'pass every parameter in params, e.g. params={"' + missing[0] + '": ...}.',
+        )
+    try:
+        point = parse_time_point(as_of)
+    except ValueError as exc:
+        return tool_error("query_as_of", f"as_of={as_of!r} is not a point in time: {exc}", _POINT_HINT)
+
+    db = ctx.request_context.lifespan_context.db
+    try:
+        result = db.execute_as_of(query, point, params)
+        return _format_results(result, limit=limit)
+    except Exception as exc:
+        hint = _QUERY_HINT
+        if "history" in str(exc).lower():
+            hint = _NO_HISTORY_HINT
+        return tool_error("query_as_of", f"query failed: {describe_exception(exc)}", hint)

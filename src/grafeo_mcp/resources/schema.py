@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import grafeo
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.resources._helpers import _format_value
-from grafeo_mcp.server import AppContext, mcp
+from grafeo_mcp.server import AppContext, AppContextView, current_app, mcp
 from grafeo_mcp.tools._helpers import index_overview
 
 SAMPLE_LIMIT = 3
@@ -101,7 +101,7 @@ def _build_index_details(db: grafeo.GrafeoDB, schema: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def graph_schema(ctx: Context[ServerSession, AppContext]) -> str:
+def graph_schema(ctx: Context[AppContext, ServerSession] | AppContextView) -> str:
     """Rich schema overview of the graph: node labels with properties, edge type patterns,
     indexes, and counts. Designed for AI agents to understand the graph structure before
     querying."""
@@ -144,7 +144,7 @@ def graph_schema(ctx: Context[ServerSession, AppContext]) -> str:
     return "\n".join(parts)
 
 
-def graph_stats(ctx: Context[ServerSession, AppContext]) -> str:
+def graph_stats(ctx: Context[AppContext, ServerSession] | AppContextView) -> str:
     """Performance-oriented database statistics: counts, indexes, storage size, and
     operational info. Use graph://schema for structural overview."""
     db = ctx.request_context.lifespan_context.db
@@ -190,16 +190,15 @@ def graph_stats(ctx: Context[ServerSession, AppContext]) -> str:
 
 
 # FastMCP turns a resource function with any parameter (even only the context)
-# into a template, and a template without URI parameters never matches a read
-# (mcp 1.26), so graph://schema and graph://stats could not be read. They are
-# registered as plain resources that fetch the request context themselves.
+# mcp 2.x does not inject Context into static resources (no URI template
+# variables), so they read the app context held by the lifespan instead.
 
 
 @mcp.resource("graph://schema", name="graph_schema", description=graph_schema.__doc__, mime_type="text/plain")
 def _graph_schema_resource() -> str:
-    return graph_schema(mcp.get_context())
+    return graph_schema(current_app())
 
 
 @mcp.resource("graph://stats", name="graph_stats", description=graph_stats.__doc__, mime_type="text/plain")
 def _graph_stats_resource() -> str:
-    return graph_stats(mcp.get_context())
+    return graph_stats(current_app())

@@ -2,7 +2,7 @@
 
 A failure is a string ``Error: <tool>: <problem>`` (plus an optional
 ``Hint: ...``), never an exception or a traceback, and the registered MCP tool
-returns it with ``isError: true``.
+returns it with ``isError: true`` (mcp 2.x: ``is_error``).
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ def _db_with_constraint() -> grafeo.GrafeoDB:
 CASES: list[tuple[str, Callable[..., str], dict[str, Any], Callable[[], Any]]] = [
     ("execute_gql", query.execute_gql, {"query": "SLECT * FORM nodes"}, grafeo.GrafeoDB),
     ("execute_gql", query.execute_gql, {"query": "RETURN $missing"}, grafeo.GrafeoDB),
+    ("query_as_of", query.query_as_of, {"query": "MATCH (n) RETURN n", "as_of": "whenever"}, grafeo.GrafeoDB),
+    ("query_as_of", query.query_as_of, {"query": "INSERT (:X)", "as_of": "60"}, grafeo.GrafeoDB),
+    ("get_node_as_of", graph.get_node_as_of, {"node_id": 0, "as_of": "whenever"}, grafeo.GrafeoDB),
     (
         "create_node",
         graph.create_node,
@@ -141,10 +144,10 @@ def test_registered_tools_flag_errors(tool, fn, kwargs, make_db):
         if isinstance(db, grafeo.GrafeoDB):
             db.close()
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
+    assert result.is_error is True
     text = result.content[0].text
     assert text.startswith(f"Error: {tool}: ")
-    assert result.structuredContent == {"result": text}
+    assert result.structured_content == {"result": text}
 
 
 def test_registered_tools_pass_success_through(populated_ctx):

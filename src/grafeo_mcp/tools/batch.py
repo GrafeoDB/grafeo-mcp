@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
@@ -126,7 +126,7 @@ def _rollback(db: Any, node_ids: list[int], edge_ids: list[int]) -> str | None:
 def batch_import(
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]] | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Bulk-create nodes and edges from JSON arrays in a single call.
 

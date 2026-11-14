@@ -1,6 +1,6 @@
 [project]
 name = "grafeo-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server exposing GrafeoDB graph database to AI agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,12 +10,17 @@ keywords = ["mcp", "graph-database", "grafeo", "ai-agents", "copilot"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Database :: Database Engines/Servers",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "grafeo>=0.5.44,<0.7",
-    "mcp>=1.26,<2",
+    "grafeo>=0.6.2,<0.7",
+    "mcp>=2.2,<3",
 ]
 
 [project.urls]
@@ -23,7 +28,7 @@ Homepage = "https://grafeo.dev/"
 Repository = "https://github.com/GrafeoDB/grafeo-mcp"
 
 [project.optional-dependencies]
-cli = ["mcp[cli]>=1.26,<2"]
+cli = ["mcp[cli]>=2.2,<3"]
 
 [project.scripts]
 grafeo-mcp = "grafeo_mcp.server:main"
@@ -51,6 +56,7 @@ python-version = "3.12"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "--cov=grafeo_mcp --cov-report=term-missing"
 
 # ── Coverage ─────────────────────────────────────────────────────────
@@ -74,4 +80,7 @@ dev = [
     "ruff>=0.15",
     "ty>=0.0.16",
     "prek>=0.3",
+    "agent-framework-core>=1.25,<2",
+    "agent-framework-foundry>=1.0",  # FoundryChatClient wiring test
+    "tenacity>=8",  # agent-framework's MCP tool retries with it
 ]

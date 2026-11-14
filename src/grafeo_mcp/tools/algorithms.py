@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
 
 from grafeo_mcp.server import AppContext
@@ -20,7 +20,7 @@ def pagerank(
     max_iterations: int = 100,
     tolerance: float = 1e-6,
     top_k: int = 20,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Run PageRank and return the top-k most important nodes.
 
@@ -78,7 +78,7 @@ def dijkstra(
     source_id: int,
     target_id: int,
     weight_property: str | None = None,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Find the shortest weighted path between two nodes (Dijkstra's algorithm).
 
@@ -94,8 +94,10 @@ def dijkstra(
         source_id: Starting node ID.
         target_id: Destination node ID.
         weight_property: Edge property to use as weight (e.g. "distance",
-            "cost"). If None every edge has weight 1.0; edges without a
-            numeric value for the property also count as 1.0.
+            "cost"). If None every edge has weight 1.0, as does an edge with
+            no value for the property. Weights can be integers, floats or
+            exact decimals (a GQL literal with a point, 2.5); a non-number
+            raises an error, as do NaN, infinite or negative weights.
 
     Returns:
         JSON object with {distance, hop_count, path: [{node_id, labels,
@@ -147,7 +149,7 @@ def dijkstra(
 @grafeo_tool(read_only=True)
 def louvain(
     resolution: float = 1.0,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Detect communities using the Louvain modularity-optimization algorithm.
 
@@ -201,7 +203,7 @@ def louvain(
 def betweenness_centrality(
     normalized: bool = True,
     top_k: int = 20,
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Compute betweenness centrality for all nodes (Brandes' algorithm).
 
@@ -245,7 +247,7 @@ def betweenness_centrality(
 
 @grafeo_tool(read_only=True)
 def connected_components(
-    ctx: Context[ServerSession, AppContext] | None = None,
+    ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
     """Find connected components (treating the graph as undirected).
 

@@ -165,9 +165,16 @@ class TestVectorGraphSearch:
 
 
 class TestQueryVectorChecks:
+    # grafeo 0.6 refuses a query vector of the wrong size, an empty one and
+    # one with NaN with an error (0.5.x panicked on a wrong size, so the tools
+    # compared it with a stored vector first). The tools pass the engine's
+    # message on, which names both sizes.
+
     def test_dimension_mismatch_is_an_error(self, vector_ctx):
         result = vector_search("Doc", "emb", [1.0, 0.0], k=3, ctx=vector_ctx)
-        assert result.startswith("Error: vector_search: query_vector has 2 dimensions but the :Doc.emb vectors have 4")
+        assert result.startswith("Error: vector_search: ")
+        assert "2 dimensions" in result and "expects 4" in result
+        assert "embed it with the model" in result, "the hint says how to get a vector of the right size"
 
     def test_dimension_mismatch_in_hybrid_and_mmr(self, vector_ctx):
         from grafeo_mcp.tools.vector import mmr_search
@@ -176,19 +183,23 @@ class TestQueryVectorChecks:
         assert mmr_search("Doc", "emb", [1.0], ctx=vector_ctx).startswith("Error: mmr_search:")
 
     def test_empty_query_vector(self, vector_ctx):
-        assert "query_vector is empty" in vector_search("Doc", "emb", [], ctx=vector_ctx)
+        result = vector_search("Doc", "emb", [], ctx=vector_ctx)
+        assert result.startswith("Error: vector_search: ") and "0 dimensions" in result
 
-    def test_unseen_dimension_mismatch_does_not_raise(self, ctx):
-        # When the sampled nodes hold no vector the size cannot be checked up
-        # front; the engine's failure (a panic in grafeo 0.5.44) still comes
-        # back as an error string and the database stays usable.
+    def test_non_finite_query_vector(self, vector_ctx):
+        result = vector_search("Doc", "emb", [float("nan"), 0.0, 0.0, 0.0], ctx=vector_ctx)
+        assert result.startswith("Error: vector_search: ") and "NaN" in result
+
+    def test_mismatch_without_stored_vectors_in_view(self, ctx):
+        # The 0.5.x workaround sampled 20 nodes for a stored vector and could
+        # miss it; the engine checks against the index itself.
         db = ctx.request_context.lifespan_context.db
         for i in range(25):
             db.create_node(["Doc"], {"i": i})
         db.create_node(["Doc"], {"emb": [1.0, 0.0, 0.0]})
         db.create_vector_index("Doc", "emb", 3, "cosine")
         result = vector_search("Doc", "emb", [1.0, 0.0], k=3, ctx=ctx)
-        assert result.startswith("Error: vector_search: ")
+        assert result.startswith("Error: vector_search: ") and "expects 3" in result
         assert json.loads(vector_search("Doc", "emb", [1.0, 0.0, 0.0], k=1, ctx=ctx))[0]["node_id"] == 25
 
     def test_k_must_be_positive(self, vector_ctx):
