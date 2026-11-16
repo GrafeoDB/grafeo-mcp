@@ -231,8 +231,8 @@ class TestLifespan:
         async with client_session(mcp, timeout_seconds=timeout.total_seconds()) as client:
             is_error, text = await _call(client, "graph_info")
             info = json.loads(text)
-            assert (info["info"]["node_count"], info["info"]["edge_count"]) == (2, 1)
-            assert info["info"]["is_persistent"] is True
+            assert (info["nodes"], info["edges"]) == (2, 1)
+            assert info["database"]["path"] == path
             is_error, text = await _call(client, "vector_search", label="Doc", property="emb", query_vector=[0.0, 1.0])
             assert not is_error, text
             assert json.loads(text)[0]["properties"]["title"] == "b"
@@ -263,7 +263,7 @@ class TestLifespan:
             is_error, text = await _call(client, "graph_info")
             assert not is_error, text
             info = json.loads(text)
-            assert (info["info"]["node_count"], info["info"]["edge_count"]) == (3, 2)
+            assert (info["nodes"], info["edges"]) == (3, 2)
             assert info["indexes"]["vector"] == [{"label": "Person", "property": "emb", "items": 2}]
             is_error, text = await _call(
                 client, "vector_search", label="Person", property="emb", query_vector=[0.0, 1.0, 0.0], k=1

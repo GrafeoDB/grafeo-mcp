@@ -89,3 +89,61 @@ class TestWriteKeywords:
         # An unterminated string runs to the end, as in the engine's lexer
         # (which then fails to parse the query).
         assert scan_query("MATCH (n) WHERE n.a = 'x DELETE n").write_keywords == []
+
+
+class TestNames:
+    """The labels, edge types and property keys a query names, for the "not in the graph" hint."""
+
+    @pytest.mark.parametrize(
+        ("query", "labels", "edge_types", "either", "keys"),
+        [
+            ("MATCH (n:Persn) RETURN n.name", {"Persn"}, set(), set(), {"name"}),
+            (
+                "MATCH (a:Person)-[r:KNOW|LIKES]->(b:Company&Org) WHERE a.nmae = $x RETURN b.title",
+                {"Person", "Company", "Org"},
+                {"KNOW", "LIKES"},
+                set(),
+                {"nmae", "title"},
+            ),
+            (
+                "MATCH (n {name: 'x', age: 3}) WHERE n:Foo RETURN {a: 1, b: n.k}",
+                set(),
+                set(),
+                {"Foo"},
+                {"name", "age", "k"},
+            ),
+            ("MATCH (n:Person WHERE n.age > 1) RETURN n", {"Person"}, set(), set(), {"age"}),
+            ("MATCH (n:`My Label`) RETURN n", {"My Label"}, set(), set(), set()),
+            (
+                "MATCH (n) WHERE EXISTS { (n)-[:WORKS_AT]->(:Company) } RETURN n",
+                {"Company"},
+                {"WORKS_AT"},
+                set(),
+                set(),
+            ),
+            ("MATCH (n:A:B) RETURN n", {"A", "B"}, set(), set(), set()),
+        ],
+    )
+    def test_names(self, query, labels, edge_types, either, keys):
+        scan = scan_query(query)
+        assert (scan.labels, scan.edge_types, scan.label_or_type, scan.property_keys) == (
+            labels,
+            edge_types,
+            either,
+            keys,
+        )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "CALL grafeo.pagerank({damping: 0.85}) YIELD node_id RETURN node_id",  # procedure name, map argument
+            "MATCH p = (a)-[*1..3]->(b) RETURN length(p)",  # a range, not a property
+            "RETURN $row.name, 1.5, 1.5e0",  # a parameter's field, decimals
+            "RETURN 'n:Label', \"m.key\"",  # inside strings
+            "RETURN x :: INT",  # a type annotation
+            "RETURN {name: 1}",  # a map literal outside a pattern
+        ],
+    )
+    def test_no_false_names(self, query):
+        scan = scan_query(query)
+        assert not (scan.labels or scan.edge_types or scan.label_or_type or scan.property_keys), scan

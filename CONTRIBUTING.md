@@ -24,7 +24,7 @@ Thank you for your interest in contributing!
 - Python 3.12+ with modern syntax
 - Format with `ruff format`, lint with `ruff check`
 - Type check with `ty`
-- Line length: 100 characters
+- Line length: 120 characters
 - Google-style docstrings
 - All new code should include tests
 

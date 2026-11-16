@@ -182,7 +182,7 @@ class TestOpenDatabaseRetention:
         with pytest.raises(RuntimeError, match="GRAFEO_HISTORY_RETENTION"):
             _env_history_retention()
         monkeypatch.setenv("GRAFEO_HISTORY_RETENTION", "-5")
-        with pytest.raises(RuntimeError, match="positive"):
+        with pytest.raises(RuntimeError, match="above 0"):
             _env_history_retention()
 
     def test_in_memory_db_with_retention(self):

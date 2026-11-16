@@ -1,52 +1,58 @@
 from __future__ import annotations
 
-from typing import Any
+import heapq
+import math
+from decimal import Decimal
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
+from pydantic import Field
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._helpers import _node_summary, _truncate, check_range, describe_exception, grafeo_tool, tool_error
 
+RankLabel = Annotated[
+    str | None,
+    Field(description='Return only nodes with this label, e.g. "Person"; scores still cover the whole graph.'),
+]
 
-def _ranked(db: Any, scores: dict[int, float], top_k: int) -> list[dict[str, Any]]:
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    return [{**_node_summary(db, node_id), "score": round(score, 8)} for node_id, score in ranked]
+
+_LABELS_HINT = "graph_info lists the labels (they are case-sensitive)."
+
+
+def _ranked(db: Any, scores: dict[int, float], top_k: int, label: str | None = None) -> list[dict[str, Any]]:
+    """The top_k scored nodes, highest first; with *label*, only nodes that have it (ranks stay graph-wide)."""
+    results: list[dict[str, Any]] = []
+    for node_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+        summary = _node_summary(db, node_id)
+        if label is not None and label not in summary.get("labels", []):
+            continue
+        results.append({**summary, "score": round(score, 8)})
+        if len(results) == top_k:
+            break
+    return results
+
+
+def _ranking(algorithm: str, scores: dict[int, float], results: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"algorithm": algorithm, **extra, "total_nodes_scored": len(scores)}
+    payload["top_k"] = len(results)
+    payload["results"] = results
+    return payload
 
 
 @grafeo_tool(read_only=True)
 def pagerank(
-    damping: float = 0.85,
+    damping: Annotated[float, Field(description="Between 0 and 1.")] = 0.85,
     max_iterations: int = 100,
     tolerance: float = 1e-6,
-    top_k: int = 20,
+    top_k: Annotated[int, Field(description="Nodes to return.")] = 20,
+    label: RankLabel = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Run PageRank and return the top-k most important nodes.
+    """Rank nodes by PageRank: how many links point at them, and from how important nodes. Returns the top_k.
 
-    PageRank assigns every node a score proportional to how many
-    (and how important) other nodes link to it. Higher scores mean
-    more connected / influential nodes.
-
-    Use this tool when: you want to find the most important or central
-    nodes in the graph based on link structure.
-    Do NOT use this for: finding similar nodes by content (use vector_search)
-    or for finding shortest paths (use dijkstra).
-
-    Args:
-        damping: Probability of following a link vs. teleporting, between
-            0 and 1 (default 0.85).
-        max_iterations: Upper bound on convergence iterations (default 100).
-        tolerance: Convergence threshold (default 1e-6).
-        top_k: How many top-ranked nodes to return (default 20). The algorithm
-            always scores every node, but only the top-k are returned to keep
-            the output manageable.
-
-    Returns:
-        JSON with total_nodes_scored and results: [{node_id, labels,
-        properties, score}] sorted by score descending. Truncated if it
-        exceeds the output budget. An empty graph gives no results; without
-        edges every node gets the same score.
+    For "the most important person", pass label="Person".
     """
     assert ctx is not None
     if not 0.0 <= damping <= 1.0:
@@ -60,51 +66,102 @@ def pagerank(
             max_iterations=max_iterations,
             tolerance=tolerance,
         )
-        results = _ranked(db, scores, top_k)
-        return _truncate(
-            {
-                "algorithm": "pagerank",
-                "total_nodes_scored": len(scores),
-                "top_k": len(results),
-                "results": results,
-            }
-        )
+        results = _ranked(db, scores, top_k, label)
+        if label and scores and not results:
+            return tool_error("pagerank", f"no node has the label {label!r}", _LABELS_HINT)
+        extra = {"label": label} if label else {}
+        return _truncate(_ranking("pagerank", scores, results, **extra))
     except Exception as exc:
         return tool_error("pagerank", describe_exception(exc), "check the graph with graph_info.")
+
+
+_DIRECTION_PATTERNS = {
+    "outgoing": "(a)-[r]->(b)",
+    "incoming": "(a)<-[r]-(b)",
+    "both": "(a)-[r]-(b)",
+}
+
+
+def _edge_weight(edge: dict[str, Any], weight_property: str | None) -> float:
+    """The weight of *edge* (a query row's edge map): 1.0 without a property or value, else a number >= 0."""
+    if weight_property is None:
+        return 1.0
+    value = edge.get(weight_property)
+    if value is None:
+        return 1.0
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        raise ValueError(
+            f"the weight {weight_property!r} of edge {edge.get('_id')} is {type(value).__name__} ({value!r}), "
+            "not a number"
+        )
+    weight = float(value)
+    if not math.isfinite(weight) or weight < 0:
+        raise ValueError(
+            f"the weight {weight_property!r} of edge {edge.get('_id')} is {value}, not a finite number of at least 0"
+        )
+    return weight
+
+
+def _shortest_path(
+    db: Any, source: int, target: int, weight_property: str | None, direction: str
+) -> tuple[float, list[int]] | None:
+    """Dijkstra over *direction* ("incoming" or "both"), reading each node's edges as it is reached.
+
+    The engine's dijkstra follows edge direction only; this walks the edges the
+    other ways with the same weight rules (missing value 1.0, a non-number,
+    infinite or negative weight an error). Only the nodes closer than the
+    target are expanded, one query each.
+    """
+    query = f"MATCH {_DIRECTION_PATTERNS[direction]} WHERE id(a) = $id RETURN id(b) AS nid, r AS e"
+    best: dict[int, float] = {source: 0.0}
+    previous: dict[int, int] = {}
+    done: set[int] = set()
+    queue: list[tuple[float, int, int]] = [(0.0, 0, source)]
+    order = 1
+    while queue:
+        distance, _, node = heapq.heappop(queue)
+        if node in done:
+            continue
+        if node == target:
+            path = [target]
+            while path[-1] != source:
+                path.append(previous[path[-1]])
+            return distance, path[::-1]
+        done.add(node)
+        for row in db.execute(query, {"id": node}):
+            neighbor = int(row["nid"])
+            if neighbor in done:
+                continue
+            candidate = distance + _edge_weight(row["e"], weight_property)
+            if candidate < best.get(neighbor, math.inf):
+                best[neighbor] = candidate
+                previous[neighbor] = node
+                heapq.heappush(queue, (candidate, order, neighbor))
+                order += 1
+    return None
 
 
 @grafeo_tool(read_only=True)
 def dijkstra(
     source_id: int,
     target_id: int,
-    weight_property: str | None = None,
+    weight_property: Annotated[
+        str | None, Field(description="Edge property with a non-negative number; without it each edge weighs 1.")
+    ] = None,
+    direction: Annotated[
+        str,
+        Field(description='"both" (default) ignores edge direction; "outgoing" or "incoming" follow it.'),
+    ] = "both",
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Find the shortest weighted path between two nodes (Dijkstra's algorithm).
+    """Shortest weighted path from source_id to target_id. Returns distance, hop_count and the path's nodes.
 
-    Edges are followed in their direction (source to target). Returns the
-    total distance and the sequence of nodes along the path.
-
-    Use this tool when: you need the shortest or cheapest path between two
-    known nodes.
-    Do NOT use this for: discovering important nodes (use pagerank) or finding
-    similar content (use vector_search).
-
-    Args:
-        source_id: Starting node ID.
-        target_id: Destination node ID.
-        weight_property: Edge property to use as weight (e.g. "distance",
-            "cost"). If None every edge has weight 1.0, as does an edge with
-            no value for the property. Weights can be integers, floats or
-            exact decimals (a GQL literal with a point, 2.5); a non-number
-            raises an error, as do NaN, infinite or negative weights.
-
-    Returns:
-        JSON object with {distance, hop_count, path: [{node_id, labels,
-        properties}, ...]}, or an error when a node does not exist or no
-        path connects them.
+    By default edges count in either direction, as "how are A and C connected" means; pass
+    direction="outgoing" to follow edges only from source to target (a dependency or a flow).
     """
     assert ctx is not None
+    if direction not in _DIRECTION_PATTERNS:
+        return tool_error("dijkstra", f"direction must be 'both', 'outgoing' or 'incoming', got {direction!r}")
     if err := check_range("dijkstra", source_id=(source_id, 0), target_id=(target_id, 0)):
         return err
     try:
@@ -116,18 +173,18 @@ def dijkstra(
                     f"{role} node {node_id} does not exist",
                     "use search_nodes_by_label or get_node to find valid node IDs.",
                 )
-        result = db.algorithms.dijkstra(
-            source=source_id,
-            target=target_id,
-            weight=weight_property,
-        )
+        if direction == "outgoing":
+            result = db.algorithms.dijkstra(source=source_id, target=target_id, weight=weight_property)
+        else:
+            result = _shortest_path(db, source_id, target_id, weight_property, direction)
 
         if result is None:
-            return tool_error(
-                "dijkstra",
-                f"no path found from node {source_id} to node {target_id}",
-                "edges are followed in their direction; use get_neighbors to check how the nodes connect.",
+            hint = (
+                'no path follows the edge direction; pass direction="both" to ignore it.'
+                if direction != "both"
+                else "the nodes are not connected at all; connected_components shows which nodes are."
             )
+            return tool_error("dijkstra", f"no path found from node {source_id} to node {target_id}", hint)
 
         distance, path_ids = result
         path = [_node_summary(db, nid) for nid in path_ids]
@@ -137,6 +194,7 @@ def dijkstra(
                 "algorithm": "dijkstra",
                 "source_id": source_id,
                 "target_id": target_id,
+                "direction": direction,
                 "distance": round(float(distance), 8),
                 "hop_count": len(path) - 1,
                 "path": path,
@@ -148,30 +206,12 @@ def dijkstra(
 
 @grafeo_tool(read_only=True)
 def louvain(
-    resolution: float = 1.0,
+    resolution: Annotated[
+        float, Field(description="Above 1: more, smaller communities; below 1: fewer, larger ones.")
+    ] = 1.0,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Detect communities using the Louvain modularity-optimization algorithm.
-
-    Groups densely-connected nodes into communities. Higher resolution
-    values produce more (smaller) communities; lower values produce fewer
-    (larger) communities. The result is deterministic: communities are
-    numbered from 0 by their smallest node ID.
-
-    Use this tool when: you want to discover clusters or groups in the graph.
-    Do NOT use this for: finding paths (use dijkstra) or ranking nodes (use
-    pagerank).
-
-    Args:
-        resolution: Resolution parameter (default 1.0). Values > 1 favor
-            smaller communities, values < 1 favor larger ones.
-
-    Returns:
-        JSON object with {modularity, num_communities, communities} where
-        communities maps community_id -> list of node summaries.
-        Output is truncated if it exceeds the output budget. An empty graph
-        has 0 communities; without edges every node is its own community.
-    """
+    """Find communities (Louvain): groups of densely linked nodes, numbered from 0 by their smallest node ID."""
     assert ctx is not None
     if err := check_range("louvain", resolution=(resolution, 0)):
         return err
@@ -201,46 +241,25 @@ def louvain(
 
 @grafeo_tool(read_only=True)
 def betweenness_centrality(
-    normalized: bool = True,
-    top_k: int = 20,
+    normalized: Annotated[bool, Field(description="Scale scores to 0..1.")] = True,
+    top_k: Annotated[int, Field(description="Nodes to return.")] = 20,
+    label: RankLabel = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Compute betweenness centrality for all nodes (Brandes' algorithm).
-
-    Betweenness centrality measures how often a node lies on the shortest
-    path between other node pairs. High-betweenness nodes are "bridges"
-    that connect different parts of the graph.
-
-    Use this tool when: you want to find bridge or bottleneck nodes.
-    Do NOT use this for: finding the most linked-to nodes (use pagerank) or
-    finding communities (use louvain).
-
-    Args:
-        normalized: If True, normalize scores by 2/((n-1)(n-2)) so they fall
-            in [0, 1] (default True).
-        top_k: Number of top-ranked nodes to return (default 20).
-
-    Returns:
-        JSON with total_nodes_scored and results: [{node_id, labels,
-        properties, score}] sorted by score descending. All scores are 0 when
-        the graph is too small or has no paths through any node.
-    """
+    """Rank nodes by betweenness: how often they lie on shortest paths between others (bridges, bottlenecks)."""
     assert ctx is not None
     if err := check_range("betweenness_centrality", top_k=(top_k, 1)):
         return err
     try:
         db = ctx.request_context.lifespan_context.db
         scores: dict[int, float] = db.algorithms.betweenness_centrality(normalized=normalized)
-        results = _ranked(db, scores, top_k)
-        return _truncate(
-            {
-                "algorithm": "betweenness_centrality",
-                "normalized": normalized,
-                "total_nodes_scored": len(scores),
-                "top_k": len(results),
-                "results": results,
-            }
-        )
+        results = _ranked(db, scores, top_k, label)
+        if label and scores and not results:
+            return tool_error("betweenness_centrality", f"no node has the label {label!r}", _LABELS_HINT)
+        extra: dict[str, Any] = {"normalized": normalized}
+        if label:
+            extra["label"] = label
+        return _truncate(_ranking("betweenness_centrality", scores, results, **extra))
     except Exception as exc:
         return tool_error("betweenness_centrality", describe_exception(exc), "check the graph with graph_info.")
 
@@ -249,19 +268,9 @@ def betweenness_centrality(
 def connected_components(
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Find connected components (treating the graph as undirected).
+    """Group nodes into connected components, ignoring edge direction.
 
-    A connected component is a maximal set of nodes such that every pair
-    is reachable from every other by following edges in either direction.
-
-    Use this tool when: you want to know how many disconnected subgraphs
-    exist, or which nodes belong to the same component.
-    Do NOT use this for: finding dense sub-communities (use louvain).
-
-    Returns:
-        JSON object with {num_components, components} where components
-        maps component_id -> list of node IDs. If every node is its own
-        component, the graph has no edges.
+    Returns num_components and components ({component id: [node IDs]}).
     """
     assert ctx is not None
     try:

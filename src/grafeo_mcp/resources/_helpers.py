@@ -15,6 +15,10 @@ def _format_value(v: object, *, str_limit: int = 80, list_limit: int = 8, list_p
             return f'"{v[: str_limit - 3]}..."'
         return f'"{v}"'
     if isinstance(v, list):
+        from grafeo_mcp.tools._helpers import is_vector, vector_placeholder
+
+        if is_vector(v):
+            return vector_placeholder(v)
         if len(v) > list_limit:
             preview = ", ".join(str(x) for x in v[:list_preview])
             return f"[{preview}, ...] ({len(v)} items)"

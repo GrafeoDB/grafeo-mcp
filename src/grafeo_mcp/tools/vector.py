@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
+from pydantic import Field
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._helpers import (
+    Ef,
+    LikeNodeId,
+    QueryVector,
+    VectorProperty,
     _node_summary,
     _read_only_guard,
     _truncate,
@@ -37,47 +42,65 @@ def _hits(db: Any, results: list[tuple[int, float]]) -> list[dict[str, Any]]:
     return output
 
 
+def _query_vector(
+    db: Any, tool: str, property: str, query_vector: list[float] | None, like_node_id: int | None
+) -> tuple[list[float] | None, str | None]:
+    """The vector to search with, from query_vector or from the stored vector of like_node_id; or an error."""
+    if (query_vector is None) == (like_node_id is None):
+        return None, tool_error(
+            tool,
+            "pass query_vector or like_node_id, not both" if query_vector is not None else "nothing to search with",
+            "pass query_vector (an embedding made with the index's model) or like_node_id (a node whose stored "
+            "vector to search near, such as one found with execute_gql).",
+        )
+    if like_node_id is None:
+        return query_vector, None
+    node = db.get_node(like_node_id)
+    if node is None:
+        return None, tool_error(
+            tool, f"node {like_node_id} not found", "find node IDs with execute_gql or search_text."
+        )
+    vector = node.properties().get(property)
+    numbers = isinstance(vector, list) and vector and all(isinstance(x, int | float) for x in vector)
+    if not numbers:
+        return None, tool_error(
+            tool,
+            f"node {like_node_id} has no vector in {property!r}",
+            "pick a node of the indexed label (graph_info lists the vector indexes), or pass query_vector.",
+        )
+    return [float(x) for x in vector], None
+
+
+def _without(results: list[tuple[int, float]], node_id: int | None, k: int) -> list[tuple[int, float]]:
+    """The first k results, leaving out node_id (the node a like_node_id search starts from)."""
+    return [hit for hit in results if hit[0] != node_id][:k]
+
+
 @grafeo_tool(read_only=True)
 def vector_search(
     label: str,
-    property: str,
-    query_vector: list[float],
-    k: int = 10,
-    ef: int | None = None,
+    property: VectorProperty,
+    query_vector: QueryVector = None,
+    k: Annotated[int, Field(description="Number of results.")] = 10,
+    ef: Ef = None,
+    like_node_id: LikeNodeId = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Find the k nearest nodes by vector similarity (HNSW index).
+    """Find the k nodes nearest to query_vector, or to node like_node_id, in a vector index.
 
-    Use this tool when: you have an embedding vector and want to find
-    semantically similar nodes. Requires a vector index created via
-    create_vector_index on the same label + property (graph_info lists them).
-    Do NOT use this for: keyword or property search (use search_text,
-    search_nodes_by_label or execute_gql).
-
-    Args:
-        label: Node label to search within (e.g. "Document").
-        property: Property that holds the embedding vector (e.g. "embedding").
-        query_vector: The query embedding as a list of floats. It must have
-            the same number of dimensions as the indexed vectors.
-        k: Number of nearest neighbors to return (default 10).
-        ef: HNSW search beam width. Higher values improve recall at the cost
-            of speed. Leave as None to use the index default.
-
-    Returns:
-        JSON array of {node_id, distance, labels, properties} sorted by
-        distance ascending (lower = more similar; the scale depends on the
-        index metric). Embedding properties longer than 32 values are left
-        out of properties.
-
-    Example call:
-        vector_search("Document", "embedding", [0.12, -0.34, ...], k=5)
+    Without an embedding model, use like_node_id ("what is most like this node?"). Nearest first.
     """
     assert ctx is not None
     if err := check_range("vector_search", k=(k, 1), ef=(ef, 1)):
         return err
     try:
         db = ctx.request_context.lifespan_context.db
-        return _truncate(_hits(db, db.vector_search(label, property, query_vector, k, ef)))
+        vector, err = _query_vector(db, "vector_search", property, query_vector, like_node_id)
+        if err:
+            return err
+        extra = 1 if like_node_id is not None else 0
+        results = db.vector_search(label, property, vector, k + extra, ef)
+        return _truncate(_hits(db, _without(results, like_node_id, k)))
     except Exception as exc:
         return tool_error("vector_search", describe_exception(exc), _INDEX_HINT)
 
@@ -85,46 +108,18 @@ def vector_search(
 @grafeo_tool(read_only=False, idempotent=True)
 def create_vector_index(
     label: str,
-    property: str,
-    dimensions: int | None = None,
-    metric: str = "cosine",
-    m: int | None = None,
-    ef_construction: int | None = None,
+    property: VectorProperty,
+    dimensions: Annotated[
+        int | None, Field(description="Vector size (1536, 384, ...); needed when no node has a vector yet.")
+    ] = None,
+    metric: Annotated[str, Field(description='"cosine", "euclidean", "dot_product" or "manhattan".')] = "cosine",
+    m: Annotated[int | None, Field(description="HNSW links per node (engine default 16).")] = None,
+    ef_construction: Annotated[int | None, Field(description="HNSW build width (engine default 128).")] = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Create an HNSW vector index for fast similarity search.
+    """Create an HNSW vector index on a label and property, for vector_search, mmr_search and vector_graph_search.
 
-    Call this once before using vector_search, mmr_search or
-    vector_graph_search on a label + property pair. Nodes that already have
-    vectors in the property are indexed immediately; nodes created or updated
-    later are indexed as they are written. Vectors written by create_node,
-    batch_import, update_node or execute_gql with a $parameter (or
-    vector([...])) are indexed; a list literal in execute_gql text is not.
-
-    Use this tool when: graph_info shows no vector index for the label and
-    property you want to search.
-    Do NOT use for: keyword search (use create_text_index).
-
-    Args:
-        label: Node label to index (e.g. "Document").
-        property: Property containing embedding vectors (e.g. "embedding").
-        dimensions: Vector dimensionality (e.g. 1536 for OpenAI, 384 for
-            MiniLM). If None the engine infers it from existing vectors, so
-            it is required when no node has a vector yet.
-        metric: Distance metric: "cosine" (default), "euclidean",
-            "dot_product", or "manhattan".
-        m: HNSW links per node (default 16 inside the engine). Higher
-            values give better recall but use more memory.
-        ef_construction: HNSW construction beam width (default 128 inside the
-            engine). Higher values build a higher-quality index but take
-            longer.
-
-    Returns:
-        A confirmation sentence on success, or an error.
-
-    Example call:
-        create_vector_index("Document", "embedding", 1536, "cosine", m=32,
-                            ef_construction=200)
+    Existing and later vectors are indexed; a list literal in execute_gql text is stored as a list, not a vector.
     """
     assert ctx is not None
     if ro := _read_only_guard(ctx, "create_vector_index"):
@@ -143,15 +138,14 @@ def create_vector_index(
             m,
             ef_construction,
         )
-        parts = [f":{label}.{property}"]
+        parts = [metric]
         if dimensions is not None:
-            parts.append(f"{dimensions}d")
-        parts.append(metric)
+            parts.insert(0, f"{dimensions} dimensions")
         if m is not None:
             parts.append(f"m={m}")
         if ef_construction is not None:
             parts.append(f"ef_construction={ef_construction}")
-        return f"HNSW index created on {', '.join(parts)}"
+        return f"Vector index created on :{label}.{property} ({', '.join(parts)})."
     except Exception as exc:
         return tool_error(
             "create_vector_index",
@@ -164,45 +158,20 @@ def create_vector_index(
 @grafeo_tool(read_only=True)
 def mmr_search(
     label: str,
-    property: str,
-    query_vector: list[float],
-    k: int = 10,
-    fetch_k: int | None = None,
-    lambda_mult: float | None = None,
-    ef: int | None = None,
+    property: VectorProperty,
+    query_vector: QueryVector = None,
+    k: Annotated[int, Field(description="Number of results.")] = 10,
+    fetch_k: Annotated[int | None, Field(description="Candidates to choose from (default 4 * k).")] = None,
+    lambda_mult: Annotated[
+        float | None, Field(description="0 = most diverse, 1 = most relevant (default 0.5).")
+    ] = None,
+    ef: Ef = None,
+    like_node_id: LikeNodeId = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Find diverse nearest neighbors using Maximal Marginal Relevance (MMR).
+    """Like vector_search, but diverse: Maximal Marginal Relevance skips near-duplicates (good RAG context).
 
-    MMR balances relevance to the query with diversity among results,
-    avoiding redundant near-duplicate results. This is ideal for RAG
-    pipelines where you want broad coverage rather than 10 variations
-    of the same paragraph. Requires a vector index (create_vector_index).
-
-    Use this tool when: you need diverse vector search results for RAG or
-    when vector_search returns too many near-duplicates.
-    Use vector_search when: you want the absolute closest matches regardless
-    of diversity.
-
-    Args:
-        label: Node label to search within (e.g. "Document").
-        property: Property that holds the embedding vector (e.g. "embedding").
-        query_vector: The query embedding as a list of floats, with the same
-            number of dimensions as the indexed vectors.
-        k: Number of diverse results to return (default 10).
-        fetch_k: Initial candidates from HNSW before MMR re-ranking
-            (default: 4*k). Higher values give MMR more to choose from.
-        lambda_mult: Balance between relevance and diversity.
-            0.0 = maximize diversity, 1.0 = maximize relevance.
-            Default: 0.5 (balanced). For RAG, try 0.3-0.7.
-        ef: HNSW search beam width. Leave as None for index default.
-
-    Returns:
-        JSON array of {node_id, distance, labels, properties}
-        ordered by MMR selection (not pure distance).
-
-    Example call:
-        mmr_search("Document", "embedding", [0.12, -0.34, ...], k=5, lambda_mult=0.3)
+    Results come in selection order.
     """
     assert ctx is not None
     if err := check_range("mmr_search", k=(k, 1), fetch_k=(fetch_k, 1), ef=(ef, 1)):
@@ -211,8 +180,12 @@ def mmr_search(
         return tool_error("mmr_search", f"lambda_mult must be between 0.0 and 1.0, got {lambda_mult}")
     try:
         db = ctx.request_context.lifespan_context.db
-        results = db.mmr_search(label, property, query_vector, k, fetch_k, lambda_mult, ef)
-        return _truncate(_hits(db, results))
+        vector, err = _query_vector(db, "mmr_search", property, query_vector, like_node_id)
+        if err:
+            return err
+        extra = 1 if like_node_id is not None else 0
+        results = db.mmr_search(label, property, vector, k + extra, fetch_k, lambda_mult, ef)
+        return _truncate(_hits(db, _without(results, like_node_id, k)))
     except Exception as exc:
         return tool_error("mmr_search", describe_exception(exc), _INDEX_HINT)
 
@@ -220,45 +193,17 @@ def mmr_search(
 @grafeo_tool(read_only=True)
 def vector_graph_search(
     label: str,
-    property: str,
-    query_vector: list[float],
-    k: int = 5,
-    expand_depth: int = 1,
-    expand_edge_type: str | None = None,
+    property: VectorProperty,
+    query_vector: QueryVector = None,
+    k: Annotated[int, Field(description="Number of seed nodes.")] = 5,
+    expand_depth: Annotated[int, Field(description="Hops to expand from each seed; 0 for none.")] = 1,
+    expand_edge_type: Annotated[str | None, Field(description="Follow only this edge type.")] = None,
+    like_node_id: LikeNodeId = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Hybrid search: find similar nodes by vector, then expand their graph neighborhood.
+    """Vector search, then the graph around each hit, in both edge directions.
 
-    This combines semantic similarity (vector search) with graph structure
-    (neighbor expansion). Use it when you want to find relevant nodes AND
-    understand their context.
-
-    Step 1: Vector search finds the top-k most similar nodes.
-    Step 2: For each result, expands outward by expand_depth hops, following
-    edges in both directions.
-
-    Use this tool when: you need both semantic relevance AND graph context.
-    Use vector_search when: you only need the similar nodes themselves.
-    Use get_neighbors when: you already have a node and want to explore around it.
-
-    Args:
-        label: Node label to search (must have a vector index).
-        property: Property holding the embedding vector.
-        query_vector: The query embedding as a list of floats.
-        k: Number of nearest seed nodes to return (default 5).
-        expand_depth: How many hops to expand from each seed (default 1).
-            Use 0 to skip expansion (equivalent to plain vector_search).
-        expand_edge_type: Optional edge type filter. If provided, only
-            edges of this type are followed during expansion.
-
-    Returns:
-        JSON object with "seeds" (vector results) and "neighbors" (expanded
-        context, each with the hop count and the node it was reached from),
-        truncated if the output is large.
-
-    Example call:
-        vector_graph_search("Article", "embedding", [0.1, ...], k=3,
-                            expand_depth=2, expand_edge_type="CITES")
+    Returns seeds (as vector_search) and neighbors, each with its hop count and the node it was reached from.
     """
     assert ctx is not None
     if err := check_range("vector_graph_search", k=(k, 1), expand_depth=(expand_depth, 0)):
@@ -267,7 +212,11 @@ def vector_graph_search(
         db = ctx.request_context.lifespan_context.db
 
         # --- Step 1: vector search -------------------------------------------
-        seeds = _hits(db, db.vector_search(label, property, query_vector, k))
+        vector, err = _query_vector(db, "vector_graph_search", property, query_vector, like_node_id)
+        if err:
+            return err
+        extra = 1 if like_node_id is not None else 0
+        seeds = _hits(db, _without(db.vector_search(label, property, vector, k + extra), like_node_id, k))
         seed_ids = [seed["node_id"] for seed in seeds]
 
         # --- Step 2: graph expansion -----------------------------------------

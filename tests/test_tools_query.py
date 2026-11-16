@@ -208,3 +208,132 @@ class TestCypherSyntax:
     def test_queries_the_engine_now_rejects_give_errors(self, populated_ctx, query):
         result = execute_gql(query, ctx=populated_ctx)
         assert result.startswith("Error: execute_gql: query failed: ")
+
+
+# ---------------------------------------------------------------------------
+# A read that finds nothing says which names do not exist
+# ---------------------------------------------------------------------------
+
+
+class TestNamesHint:
+    def _run(self, query, ctx):
+        return json.loads(execute_gql(query, ctx=ctx))
+
+    def test_misspelled_label(self, populated_ctx):
+        result = self._run("MATCH (n:Persn) RETURN n.name", populated_ctx)
+        assert result["rows"] == []
+        assert result["hint"] == "Not in the graph: label :Persn (did you mean :Person?)."
+
+    def test_label_in_the_wrong_case(self, populated_ctx):
+        result = self._run("MATCH (n:person) RETURN n", populated_ctx)
+        assert result["hint"] == "Not in the graph: label :person (did you mean :Person?)."
+
+    def test_unknown_edge_type_lists_the_few_that_exist(self, populated_ctx):
+        result = self._run("MATCH (a)-[:FRIEND_OF]->(b) RETURN a", populated_ctx)
+        assert result["hint"] == "Not in the graph: edge type :FRIEND_OF (there are: :KNOWS, :WORKS_AT)."
+
+    def test_misspelled_property_in_a_filter(self, populated_ctx):
+        result = self._run("MATCH (n:Person) WHERE n.nmae = 'Alice' RETURN n", populated_ctx)
+        assert result["hint"] == "Not in the graph: property nmae (did you mean name?)."
+
+    def test_misspelled_property_that_returns_only_nulls(self, populated_ctx):
+        result = self._run("MATCH (n:Person) RETURN n.nmae AS x", populated_ctx)
+        assert result["total_rows"] == 3
+        assert result["hint"] == "Not in the graph: property nmae (did you mean name?)."
+
+    def test_empty_graph(self, ctx):
+        assert self._run("MATCH (n:Person) RETURN n", ctx)["hint"] == "The graph has no nodes yet."
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (n:Person) RETURN n.name",  # rows with values
+            "MATCH (n:Person) WHERE n.name = 'Nobody' RETURN n",  # empty, but every name exists
+            "MATCH (n:Person) RETURN n.missing_on_purpose IS NULL AS x",  # a boolean column, never null
+        ],
+    )
+    def test_no_hint_when_the_names_exist(self, populated_ctx, query):
+        assert "hint" not in self._run(query, populated_ctx)
+
+    def test_no_hint_for_writes(self, populated_ctx):
+        result = self._run("MATCH (n:Persn) SET n.x = 1", populated_ctx)
+        assert "hint" not in result
+
+
+class TestErrorHints:
+    """The hint follows the engine's error code: syntax, names and types, or a value at run time."""
+
+    @pytest.mark.parametrize(
+        ("query", "code", "hint"),
+        [
+            ("MATC (n) RETURN n", "GRAFEO-Q001", "check the query syntax"),
+            ("MATCH (n) RETURN m", "GRAFEO-Q002", "fix what the message points at"),
+            ("RETURN 1/0", "GRAFEO-Q006", "the query is valid but a value broke it while running"),
+        ],
+    )
+    def test_hint_by_code(self, ctx, query, code, hint):
+        result = execute_gql(query, ctx=ctx)
+        assert result.startswith(f"Error: execute_gql: query failed: {code}"), result
+        assert f"Hint: {hint}" in result
+
+
+class TestPatternInWhere:
+    """Cypher lets WHERE test a path directly; GQL needs EXISTS { ... }. The hint says so."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (p:Person) WHERE p.age > 30 AND (p)-[:WORKS_AT]->(:Company {industry: 'Technology'}) RETURN p.name",
+            "MATCH (p:Person) WHERE (p)-[:KNOWS]->() RETURN p.name",
+            "MATCH (p:Person)\nWHERE NOT (p)-->(:Company)\nRETURN p.name",
+            "MATCH (c:Company) WHERE (c)<-[:WORKS_AT]-(:Person) RETURN c.name",
+            "MATCH (p:Person) WHERE (p)--(:Company) RETURN p.name",
+        ],
+    )
+    def test_pattern_in_where_gets_the_exists_hint(self, populated_ctx, query):
+        result = execute_gql(query, ctx=populated_ctx)
+        assert result.startswith("Error: execute_gql: query failed: GRAFEO-Q001"), result
+        assert "Hint: a path pattern in WHERE needs EXISTS" in result
+
+    @pytest.mark.parametrize(
+        "query",
+        ["MATC (n) RETURN n", "MATCH (p:Person)-[:KNOWS RETURN p", "MATCH (p)-[:KNOWS]-> RETURN p"],
+    )
+    def test_other_syntax_errors_keep_the_syntax_hint(self, populated_ctx, query):
+        assert "Hint: check the query syntax" in execute_gql(query, ctx=populated_ctx)
+
+    def test_the_hinted_forms_run(self, populated_ctx):
+        exists = "MATCH (p:Person) WHERE p.age > 26 AND EXISTS { (p)-[:WORKS_AT]->(:Company {name: 'Acme'}) } "
+        in_match = "MATCH (p:Person)-[:WORKS_AT]->(:Company {name: 'Acme'}) WHERE p.age > 26 "
+        for query in (exists, in_match):
+            rows = json.loads(execute_gql(query + "RETURN p.name AS name", ctx=populated_ctx))["rows"]
+            assert rows == [{"name": "Alice"}], query
+
+
+class TestPatternInDelete:
+    """DELETE takes variables; a path pattern after it gets a hint saying how to bind the edge."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (b:Person {name: 'Bob'})-[:WORKS_AT]->(c:Company) DELETE (b)-[:WORKS_AT]->(c) RETURN b, c",
+            "MATCH (b:Person)-[:KNOWS]->(c) DELETE (b)-[r]->(c)",
+            "MATCH (b:Person)-[:KNOWS]->(c) DETACH DELETE b-[r]->c",
+        ],
+    )
+    def test_pattern_after_delete_gets_the_variable_hint(self, populated_ctx, query):
+        result = execute_gql(query, ctx=populated_ctx)
+        assert result.startswith("Error: execute_gql: query failed: GRAFEO-Q001"), result
+        assert "Hint: DELETE takes variables, not patterns" in result
+
+    @pytest.mark.parametrize(
+        "query",
+        ["MATCH (b:Person) DELETE b RETRN b", "MATCH (b:Person)-[w:KNOWS]->(c) DELETE w RETURN b.name LIMT 1"],
+    )
+    def test_other_errors_after_delete_keep_the_syntax_hint(self, populated_ctx, query):
+        assert "Hint: check the query syntax" in execute_gql(query, ctx=populated_ctx)
+
+    def test_the_hinted_form_runs(self, populated_ctx):
+        query = "MATCH (b:Person {name: 'Bob'})-[w:WORKS_AT]->(c:Company) DELETE w RETURN c.name AS company"
+        result = json.loads(execute_gql(query, ctx=populated_ctx))
+        assert result["rows"] == [{"company": "Acme"}] and result["counters"]["edges_deleted"] == 1

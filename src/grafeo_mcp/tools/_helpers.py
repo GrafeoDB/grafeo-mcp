@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import Field
 
 from grafeo_mcp.server import mcp
 
@@ -27,6 +29,26 @@ from grafeo_mcp.server import mcp
 # create_text_index.
 
 ERROR_PREFIX = "Error: "
+
+# ---------------------------------------------------------------------------
+# Shared argument types: the description goes into the tool's input schema.
+# An argument whose name says it all (node_id, label) has none.
+# ---------------------------------------------------------------------------
+
+AsOf = Annotated[
+    str, Field(description='Seconds ago ("300") or an ISO-8601 datetime with its offset ("2026-11-09T10:00:00+00:00").')
+]
+Properties = Annotated[dict[str, Any] | None, Field(description='Property values: {"name": "Ada", "born": 1815}.')]
+VectorProperty = Annotated[str, Field(description='The property that holds the embeddings, e.g. "embedding".')]
+QueryVector = Annotated[
+    list[float] | None,
+    Field(description="The query embedding (the index's model and size), or use like_node_id."),
+]
+LikeNodeId = Annotated[
+    int | None,
+    Field(description="Search near this node's stored vector; the node itself is left out."),
+]
+Ef = Annotated[int | None, Field(description="HNSW search width; higher finds more, slower.")]
 
 
 def tool_error(tool: str, problem: str, hint: str | None = None) -> str:
@@ -130,6 +152,10 @@ def grafeo_tool(
     callers always get a string. The registered MCP tool additionally reports
     error strings with ``isError: true``.
 
+    Tools are registered unstructured: results are JSON text, and declaring
+    an output schema would make the SDK send every result a second time as
+    ``structuredContent`` (the same JSON again, escaped inside a string).
+
     Args:
         read_only: The tool never changes the database (MCP ``readOnlyHint``).
         destructive: The tool may overwrite or delete data (``destructiveHint``).
@@ -150,14 +176,13 @@ def grafeo_tool(
         def mcp_entry(*args: Any, **kwargs: Any) -> str | CallToolResult:
             result = guarded(*args, **kwargs)
             if is_error(result):
-                return CallToolResult(
-                    content=[TextContent(type="text", text=result)],
-                    structured_content={"result": result},
-                    is_error=True,
-                )
+                return CallToolResult(content=[TextContent(type="text", text=result)], is_error=True)
             return result
 
-        mcp.tool(annotations=annotations)(mcp_entry)
+        # Python 3.13 strips docstring indentation at compile time, 3.12 does not: clean it here so every
+        # version sends the same description, without four spaces on every line.
+        description = inspect.cleandoc(fn.__doc__ or "")
+        mcp.tool(annotations=annotations, structured_output=False, description=description)(mcp_entry)
         return guarded
 
     return decorator
@@ -214,19 +239,17 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-def to_json(payload: Any, *, compact: bool = False) -> str:
-    """Serialise a tool result to JSON.
+def to_json(payload: Any) -> str:
+    """Serialise a tool result to compact JSON (no space after ``,`` and ``:``).
 
     Decimals become JSON numbers that keep their digits; other values JSON
     cannot hold (dates, times, durations) become their text.
     """
-    separators = (",", ":") if compact else None
-    text = json.dumps(payload, default=_json_default, separators=separators)
+    text = json.dumps(payload, default=_json_default, separators=(",", ":"))
     return _DECIMAL_TOKEN.sub(r"\1", text)
 
 
-def _dumps(payload: Any) -> str:
-    return to_json(payload, compact=True)
+_dumps = to_json
 
 
 _META_KEYS = frozenset({"truncated", "omitted", "note"})
@@ -365,16 +388,56 @@ def _truncate(payload: Any, *, limit: int = _MAX_RESULT_CHARS) -> str:
 # ---------------------------------------------------------------------------
 
 
+_VECTOR_MIN_LENGTH = 33
+"""A list of at least this many numbers is an embedding, shown as a placeholder."""
+
+
+def is_vector(value: Any) -> bool:
+    """True for an embedding: a list of more than 32 numbers."""
+    return (
+        isinstance(value, list)
+        and len(value) >= _VECTOR_MIN_LENGTH
+        and all(isinstance(x, int | float | Decimal) and not isinstance(x, bool) for x in value)
+    )
+
+
+def vector_placeholder(value: list[Any]) -> str:
+    return f"<vector: {len(value)} dims>"
+
+
+def compact_properties(props: dict[str, Any]) -> dict[str, Any]:
+    """*props* with every embedding replaced by ``<vector: N dims>``, so a node costs tens of tokens, not thousands.
+
+    The placeholder still tells an agent the property exists (vector tools take its name); the values come back
+    when a query asks for that property by name (``RETURN n.embedding``).
+    """
+    return {key: vector_placeholder(value) if is_vector(value) else value for key, value in props.items()}
+
+
+def compact_graph_values(value: Any) -> Any:
+    """Compact the embeddings inside every node and edge map (a dict with ``_id``) in a query result.
+
+    A value returned on its own, such as ``RETURN n.embedding AS v``, is left whole.
+    """
+    if isinstance(value, dict):
+        if "_id" in value:
+            return {k: compact_graph_values(v) if k.startswith("_") else _compact_value(v) for k, v in value.items()}
+        return {k: compact_graph_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [compact_graph_values(item) for item in value]
+    return value
+
+
+def _compact_value(value: Any) -> Any:
+    return vector_placeholder(value) if is_vector(value) else compact_graph_values(value)
+
+
 def _node_summary(db: Any, node_id: int) -> dict[str, Any]:
-    """Fetch a node and return a lightweight dict (id + labels + properties)."""
+    """Fetch a node and return a lightweight dict (id + labels + properties, embeddings as placeholders)."""
     node = db.get_node(node_id)
     if node is None:
         return {"node_id": node_id, "error": "node not found"}
-    props = node.properties()
-    # Drop large vector/embedding properties from the summary so we don't
-    # blow up the output with thousands of floats.
-    props = {k: v for k, v in props.items() if not (isinstance(v, list) and len(v) > 32)}
-    return {"node_id": node_id, "labels": node.labels, "properties": props}
+    return {"node_id": node_id, "labels": node.labels, "properties": compact_properties(node.properties())}
 
 
 def _split_index_name(name: str) -> tuple[str, str]:

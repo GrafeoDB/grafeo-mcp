@@ -47,7 +47,7 @@ class TestCreateTextIndex:
         db = ctx.request_context.lifespan_context.db
         db.create_node(["Doc"], {"content": "hello world"})
         result = create_text_index("Doc", "content", ctx=ctx)
-        assert "text index created" in result.lower()
+        assert result == "Text index created on :Doc.content."
 
 
 # ---------------------------------------------------------------------------

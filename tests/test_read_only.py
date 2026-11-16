@@ -211,4 +211,4 @@ class TestReadOnlyExecuteGql:
 
     def test_other_read_tools_allowed(self, ro_ctx):
         assert get_neighbors(0, ctx=ro_ctx).startswith("{")
-        assert json.loads(graph_info(ctx=ro_ctx))["server"] == {"read_only": True}
+        assert json.loads(graph_info(ctx=ro_ctx))["database"]["read_only"] is True

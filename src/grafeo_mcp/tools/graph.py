@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 import grafeo
 from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
+from pydantic import Field
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._helpers import (
     _NO_HISTORY_HINT,
     _POINT_HINT,
+    AsOf,
+    Properties,
     _read_only_guard,
+    _truncate,
     check_range,
+    compact_properties,
     describe_exception,
     grafeo_tool,
     index_overview,
@@ -42,7 +47,7 @@ def _node_to_dict(node) -> dict[str, Any]:
     return {
         "id": node.id,
         "labels": list(node.labels),
-        "properties": node.properties(),
+        "properties": compact_properties(node.properties()),
     }
 
 
@@ -53,12 +58,29 @@ def _edge_to_dict(edge) -> dict[str, Any]:
         "source_id": edge.source_id,
         "target_id": edge.target_id,
         "edge_type": edge.edge_type,
-        "properties": edge.properties(),
+        "properties": compact_properties(edge.properties()),
     }
 
 
 def _db(ctx: Any) -> grafeo.GrafeoDB:
     return ctx.request_context.lifespan_context.db
+
+
+def _schema_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """A label or edge type from ``db.schema()``, compact: properties as ``{name: type}``.
+
+    A property seen with several types lists them as ``"INT64|STRING"``; an
+    edge type's endpoints are ``"Person->Company"`` label pairs. Empty
+    properties and endpoints are left out.
+    """
+    out: dict[str, Any] = {"name": entry["name"], "count": entry.get("count")}
+    properties = {prop["name"]: "|".join(prop.get("types") or []) or "ANY" for prop in entry.get("properties") or []}
+    if properties:
+        out["properties"] = properties
+    endpoints = [f"{ep.get('source') or '?'}->{ep.get('target') or '?'}" for ep in entry.get("endpoints") or []]
+    if endpoints:
+        out["endpoints"] = endpoints
+    return out
 
 
 def _count_edges(db: grafeo.GrafeoDB, node_id: int) -> int:
@@ -73,30 +95,14 @@ def _count_edges(db: grafeo.GrafeoDB, node_id: int) -> int:
 
 @grafeo_tool(read_only=False)
 def create_node(
-    labels: list[str],
-    properties: dict[str, Any] | None = None,
+    labels: Annotated[list[str], Field(description='One or more labels: ["Person"].')],
+    properties: Properties = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Create a new node in the graph with the given labels and properties.
+    """Create one node and return it with its id.
 
-    Use this tool when: you need to add a single new entity to the graph.
-    Do NOT use this for: bulk inserts (use batch_import), creating
-    relationships (use create_edge), or create-if-missing by a key (use
-    execute_gql with MERGE).
-
-    Args:
-        labels: One or more node labels (e.g. ["Person"] or ["Person", "Employee"]).
-        properties: Optional key-value properties (e.g. {"name": "Alice", "age": 30}).
-            Omit or pass null for a node with no properties.
-
-    Returns:
-        JSON with the created node's id, labels, and properties. Fails if the
-        node breaks a schema constraint (e.g. a duplicate UNIQUE value).
-
-    Examples:
-        create_node(["Person"], {"name": "Alice", "age": 30})
-        create_node(["Company"], {"name": "Acme", "founded": 2010})
-        create_node(["Tag"])  # no properties
+    For many nodes use batch_import; to create only when missing, execute_gql with MERGE.
+    A list of numbers is stored as a vector, so vector indexes pick it up.
     """
     assert ctx is not None
     if ro := _read_only_guard(ctx, "create_node"):
@@ -116,32 +122,11 @@ def create_node(
 def create_edge(
     source_id: int,
     target_id: int,
-    edge_type: str,
-    properties: dict[str, Any] | None = None,
+    edge_type: Annotated[str, Field(description='Relationship type: "KNOWS".')],
+    properties: Properties = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Create a directed edge (relationship) between two existing nodes.
-
-    Both nodes must already exist: the edge is refused otherwise.
-
-    Use this tool when: you need to connect two nodes with a typed relationship.
-    Do NOT use this for: creating nodes (use create_node), many edges at once
-    (use batch_import) or querying relationships (use get_neighbors or
-    execute_gql).
-
-    Args:
-        source_id: The source node ID (integer).
-        target_id: The target node ID (integer).
-        edge_type: Relationship type string (e.g. "KNOWS", "WORKS_AT").
-        properties: Optional edge properties (e.g. {"since": 2020, "weight": 1.5}).
-
-    Returns:
-        JSON with the created edge's id, source_id, target_id, edge_type, and properties.
-
-    Examples:
-        create_edge(1, 2, "KNOWS")
-        create_edge(1, 3, "WORKS_AT", {"since": 2020})
-    """
+    """Create one directed edge from source_id to target_id (both must exist) and return it with its id."""
     assert ctx is not None
     if ro := _read_only_guard(ctx, "create_edge"):
         return ro
@@ -169,25 +154,7 @@ def get_node(
     node_id: int,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Get a single node by its ID.
-
-    Returns the node's labels and all properties.
-
-    Use this tool when: you have a specific node ID and need its details.
-    Do NOT use this for: searching nodes by label or property (use
-    search_nodes_by_label or execute_gql).
-
-    Args:
-        node_id: The numeric node ID (e.g. 0, 1, 42).
-
-    Returns:
-        JSON with id, labels, and properties, or an error if there is no
-        node with that ID.
-
-    Examples:
-        get_node(0)
-        get_node(42)
-    """
+    """Get one node by ID: its labels and properties. Find IDs with search_nodes_by_label or execute_gql."""
     assert ctx is not None
     if err := check_range("get_node", node_id=(node_id, 0)):
         return err
@@ -207,30 +174,12 @@ def get_node(
 @grafeo_tool(read_only=True)
 def get_node_as_of(
     node_id: int,
-    as_of: str,
+    as_of: AsOf,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Get a node as it was at an earlier point in time.
+    """Get a node's labels and properties as they were at as_of (time travel).
 
-    Time travel (grafeo 0.6.2 history retention): reads the committed state at
-    *as_of*. The server must keep history: start it with
-    GRAFEO_HISTORY_RETENTION=forever (or a number of seconds).
-
-    Use this tool when: you want a node's old property values, before an update
-    or delete. Do NOT use this for: the current state (use get_node).
-
-    Args:
-        node_id: The numeric node ID.
-        as_of: The point in time: seconds ago as a number ("300"), or an
-            ISO-8601 datetime with its offset ("2026-11-09T10:00:00+00:00").
-
-    Returns:
-        JSON with id, labels, and properties as they were, or an error when the
-        node did not exist at that point.
-
-    Examples:
-        get_node_as_of(0, "3600")
-        get_node_as_of(42, "2026-11-09T10:00:00+00:00")
+    Needs a server that keeps history (GRAFEO_HISTORY_RETENTION).
     """
     assert ctx is not None
     if err := check_range("get_node_as_of", node_id=(node_id, 0)):
@@ -260,40 +209,18 @@ def get_node_as_of(
 @grafeo_tool(read_only=True)
 def search_nodes_by_label(
     label: str,
-    limit: int = _MAX_LABEL_RESULTS,
-    offset: int = 0,
+    limit: Annotated[int, Field(description="Page size.")] = _MAX_LABEL_RESULTS,
+    offset: Annotated[int, Field(description="Nodes to skip, for the next page.")] = 0,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Find nodes that have a specific label.
-
-    Returns node IDs and their properties, paginated by limit/offset.
-
-    Use this tool when: you want to list or browse nodes of a certain type
-    (e.g. all Person nodes, all Company nodes).
-    Do NOT use this for: getting a single node by ID (use get_node), or
-    complex filtered queries (use execute_gql).
-
-    Args:
-        label: The label to filter by (e.g. "Person", "Company").
-        limit: Maximum number of results to return (default 100).
-        offset: Number of results to skip for pagination (default 0).
-
-    Returns:
-        JSON with a list of {node_id, properties} objects, the count, and a
-        note when the page is full (there may be more).
-
-    Examples:
-        search_nodes_by_label("Person")
-        search_nodes_by_label("Company", limit=10)
-        search_nodes_by_label("Person", limit=50, offset=50)  # page 2
-    """
+    """List the nodes that have one label, with their properties, a page at a time. Filter with execute_gql."""
     assert ctx is not None
     if err := check_range("search_nodes_by_label", limit=(limit, 1), offset=(offset, 0)):
         return err
     try:
         nodes = _db(ctx).get_nodes_by_label(label, limit=limit, offset=offset)
 
-        results = [{"node_id": node_id, "properties": props} for node_id, props in nodes]
+        results = [{"node_id": node_id, "properties": compact_properties(props)} for node_id, props in nodes]
 
         payload: dict[str, Any] = {
             "label": label,
@@ -309,7 +236,7 @@ def search_nodes_by_label(
                 f"Use offset={offset + limit} to fetch the next page."
             )
 
-        return to_json(payload)
+        return _truncate(payload)
     except Exception as exc:
         return tool_error(
             "search_nodes_by_label",
@@ -322,41 +249,27 @@ def search_nodes_by_label(
 def graph_info(
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Get an overview of the graph database: counts, labels, edge types, indexes and engine.
+    """Overview of the graph; call it before querying.
 
-    Use this tool when: you need to understand what data is in the graph
-    before writing queries, to see which vector and text indexes exist
-    before vector_search or search_text, or to verify the database state
-    after mutations.
-    Do NOT use this for: retrieving specific node/edge data (use get_node,
-    search_nodes_by_label, or execute_gql).
-
-    Returns:
-        JSON with:
-          info: mode, node_count, edge_count, is_persistent, path, version.
-          schema: labels and edge_types (each with a count), property_keys.
-          stats: detailed statistics (memory_bytes, disk_bytes, ...).
-          indexes: vector and text indexes ({label, property, items}) and
-            the property keys that have a property index.
-          engine: grafeo version and the compiled-in features (query
-            languages, algorithms, vector and text search).
-          server: read_only is true when mutation tools are disabled.
+    Returns node and edge counts; each label and edge type with its count and property types (and
+    for edges the label pairs they connect); the vector, text and property indexes; and the database
+    path (null in memory), whether writes are disabled, and the engine version.
     """
     assert ctx is not None
     try:
         app = ctx.request_context.lifespan_context
         db = app.db
         schema = db.schema()
-        build = grafeo.build_info()
         payload: dict[str, Any] = {
-            "info": db.info(),
-            "schema": schema,
-            "stats": db.detailed_stats(),
+            "nodes": db.node_count,
+            "edges": db.edge_count,
+            "labels": [_schema_entry(entry) for entry in schema.get("labels", [])],
+            "edge_types": [_schema_entry(entry) for entry in schema.get("edge_types", [])],
             "indexes": index_overview(db, list(schema.get("property_keys", []))),
-            "engine": {"version": build.get("version"), "features": build.get("features", [])},
-            "server": {"read_only": bool(app.read_only)},
+            "database": {"path": db.path, "read_only": bool(app.read_only)},
+            "engine": f"grafeo {grafeo.__version__}",
         }
-        return to_json(payload)
+        return _truncate(payload)
     except Exception as exc:
         return tool_error("graph_info", f"could not read database info: {describe_exception(exc)}")
 
@@ -364,39 +277,14 @@ def graph_info(
 @grafeo_tool(read_only=True)
 def get_neighbors(
     node_id: int,
-    direction: str = "both",
-    edge_type: str | None = None,
-    limit: int = _MAX_NEIGHBORS,
+    direction: Annotated[str, Field(description='"outgoing", "incoming" or "both".')] = "both",
+    edge_type: Annotated[str | None, Field(description="Follow only this edge type.")] = None,
+    limit: Annotated[int, Field(description="Most edges to follow.")] = _MAX_NEIGHBORS,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Get neighboring nodes connected to a given node.
+    """List the nodes one hop from node_id, each with the edge that links it (edge_id, edge_type).
 
-    This is the primary tool for graph traversal. Use it to explore the
-    neighborhood of a known node. Returns connected nodes with the edges
-    that link them.
-
-    Use this tool when: you have a node ID and want to see what it connects to.
-    Do NOT use this for: finding nodes by property (use search_nodes_by_label)
-    or running complex multi-hop queries (use execute_gql).
-
-    Args:
-        node_id: The ID of the node to get neighbors for.
-        direction: "outgoing" (node-->neighbor), "incoming" (neighbor-->node),
-            or "both" (default). Controls which direction of edges to follow.
-        edge_type: Filter by relationship type (e.g. "KNOWS"). None returns
-            all edge types.
-        limit: Maximum number of edges to follow (default 50). A neighbor
-            linked by several edges is listed once.
-
-    Returns:
-        JSON with the center node, a list of neighbors (with connecting edge
-        info), and counts.
-
-    Examples:
-        get_neighbors(0)
-        get_neighbors(42, direction="outgoing")
-        get_neighbors(1, edge_type="KNOWS", limit=10)
-        get_neighbors(5, direction="incoming", edge_type="WORKS_AT")
+    For longer paths use execute_gql.
     """
     assert ctx is not None
     pattern = _DIRECTIONS.get(direction)
@@ -442,7 +330,7 @@ def get_neighbors(
             }
             if neighbor_node is not None:
                 neighbor_info["labels"] = list(neighbor_node.labels)
-                neighbor_info["properties"] = neighbor_node.properties()
+                neighbor_info["properties"] = compact_properties(neighbor_node.properties())
 
             neighbors.append(neighbor_info)
 
@@ -462,7 +350,7 @@ def get_neighbors(
                 "for a full traversal query."
             )
 
-        return to_json(payload)
+        return _truncate(payload)
 
     except Exception as exc:
         return tool_error(
@@ -475,33 +363,13 @@ def get_neighbors(
 @grafeo_tool(read_only=False, destructive=True, idempotent=True)
 def update_node(
     node_id: int,
-    properties: dict[str, Any],
-    merge: bool = True,
+    properties: Annotated[dict[str, Any], Field(description="Properties to set.")],
+    merge: Annotated[bool, Field(description="Keep the properties not listed (true) or remove them.")] = True,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Update properties on an existing node.
+    """Set properties on an existing node and return it.
 
-    Use this tool when: you need to modify a node's properties after creation.
-    Do NOT use for: changing labels (use execute_gql with SET n:Label or
-    REMOVE n:Label), creating new nodes (use create_node), or deleting nodes
-    (use delete_node).
-
-    Args:
-        node_id: The ID of the node to update.
-        properties: Key-value properties to set. Values can be strings,
-            numbers, booleans, or lists.
-        merge: If True (default), merge with existing properties (new keys
-            are added, existing keys are overwritten, unlisted keys are
-            kept). If False, replace all properties (unlisted keys are
-            removed).
-
-    Returns:
-        JSON with the updated node's id, labels, and properties. Fails if a
-        value breaks a schema constraint.
-
-    Examples:
-        update_node(0, {"age": 31})                     # merge: keep other props
-        update_node(0, {"name": "Alice"}, merge=False)  # replace all props
+    Labels change with execute_gql (SET n:Label, REMOVE n:Label).
     """
     assert ctx is not None
     if ro := _read_only_guard(ctx, "update_node"):
@@ -531,28 +399,10 @@ def update_node(
 @grafeo_tool(read_only=False, destructive=True, idempotent=True)
 def delete_node(
     node_id: int,
-    detach: bool = True,
+    detach: Annotated[bool, Field(description="Also delete its edges (true), or fail when it has any.")] = True,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Delete a node from the graph.
-
-    Use this tool when: you need to remove a node permanently.
-    Do NOT use for: updating properties (use update_node) or deleting
-    edges only (use delete_edge).
-
-    Args:
-        node_id: The ID of the node to delete.
-        detach: If True (default), also delete all edges connected to this
-            node (DETACH DELETE), in one atomic step. If False, fail if the
-            node has any connected edges.
-
-    Returns:
-        A confirmation sentence on success, or an error.
-
-    Examples:
-        delete_node(42)                # detach delete (remove edges too)
-        delete_node(42, detach=False)  # fail if edges exist
-    """
+    """Delete one node, and with detach its edges, in one step."""
     assert ctx is not None
     if ro := _read_only_guard(ctx, "delete_node"):
         return ro
@@ -592,29 +442,13 @@ def delete_node(
 @grafeo_tool(read_only=False, destructive=True, idempotent=True)
 def update_edge(
     edge_id: int,
-    properties: dict[str, Any],
-    merge: bool = True,
+    properties: Annotated[dict[str, Any], Field(description="Properties to set.")],
+    merge: Annotated[bool, Field(description="Keep the properties not listed (true) or remove them.")] = True,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Update properties on an existing edge.
+    """Set properties on an existing edge and return it.
 
-    Use this tool when: you need to modify an edge's properties after creation.
-    Do NOT use for: changing the edge type (delete and recreate), creating
-    new edges (use create_edge), or deleting edges (use delete_edge).
-
-    Args:
-        edge_id: The ID of the edge to update.
-        properties: Key-value properties to set.
-        merge: If True (default), merge with existing properties. If False,
-            replace all properties.
-
-    Returns:
-        JSON with the updated edge's id, source_id, target_id, edge_type,
-        and properties.
-
-    Examples:
-        update_edge(0, {"weight": 2.5})
-        update_edge(0, {"since": 2024}, merge=False)
+    The edge type cannot change: delete the edge and create a new one.
     """
     assert ctx is not None
     if ro := _read_only_guard(ctx, "update_edge"):
@@ -646,21 +480,7 @@ def delete_edge(
     edge_id: int,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Delete an edge from the graph.
-
-    Use this tool when: you need to remove a relationship between two nodes.
-    Do NOT use for: deleting nodes (use delete_node) or updating edge
-    properties (use update_edge).
-
-    Args:
-        edge_id: The ID of the edge to delete.
-
-    Returns:
-        A confirmation sentence on success, or an error.
-
-    Examples:
-        delete_edge(5)
-    """
+    """Delete one edge. Edge IDs come from get_neighbors (edge_id) or execute_gql (RETURN id(r) AS id)."""
     assert ctx is not None
     if ro := _read_only_guard(ctx, "delete_edge"):
         return ro

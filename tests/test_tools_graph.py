@@ -128,24 +128,38 @@ class TestSearchNodesByLabel:
 
 class TestGraphInfo:
     def test_empty_db(self, ctx):
-        result = json.loads(graph_info(ctx=ctx))
-        assert "info" in result
-        assert "schema" in result
-        assert "stats" in result
+        import grafeo
+
+        assert json.loads(graph_info(ctx=ctx)) == {
+            "nodes": 0,
+            "edges": 0,
+            "labels": [],
+            "edge_types": [],
+            "indexes": {"vector": [], "text": [], "property": []},
+            "database": {"path": None, "read_only": False},
+            "engine": f"grafeo {grafeo.__version__}",
+        }
 
     def test_populated(self, populated_ctx):
         result = json.loads(graph_info(ctx=populated_ctx))
-        info = result["info"]
-        assert info["node_count"] == 5
-        assert info["edge_count"] == 5
+        assert (result["nodes"], result["edges"]) == (5, 5)
+        labels = {entry["name"]: entry for entry in result["labels"]}
+        assert labels["Person"] == {"name": "Person", "count": 3, "properties": {"age": "INT64", "name": "STRING"}}
+        edge_types = {entry["name"]: entry for entry in result["edge_types"]}
+        assert edge_types["KNOWS"] == {"name": "KNOWS", "count": 2, "endpoints": ["Person->Person"]}
+        assert edge_types["WORKS_AT"]["properties"] == {"since": "INT64"}
+        assert edge_types["WORKS_AT"]["endpoints"] == ["Person->Company"]
 
-    def test_engine_and_server_sections(self, ctx):
-        import grafeo
+    def test_mixed_property_types_are_joined(self, ctx):
+        db = ctx.request_context.lifespan_context.db
+        db.create_node(["Item"], {"code": 1})
+        db.create_node(["Item"], {"code": "A1"})
+        (item,) = json.loads(graph_info(ctx=ctx))["labels"]
+        assert sorted(item["properties"]["code"].split("|")) == ["INT64", "STRING"]
 
-        result = json.loads(graph_info(ctx=ctx))
-        assert result["engine"]["version"] == grafeo.__version__
-        assert "gql" in result["engine"]["features"]
-        assert result["server"] == {"read_only": False}
+    def test_stays_small(self, populated_ctx):
+        """graph_info is the first call of every session: no duplicated sections, no engine feature list."""
+        assert len(graph_info(ctx=populated_ctx)) < 700
 
     def test_lists_vector_text_and_property_indexes(self, ctx):
         db = ctx.request_context.lifespan_context.db

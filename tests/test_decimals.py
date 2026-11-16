@@ -41,8 +41,8 @@ def _as_exact(value: Any) -> Any:
 
 class TestToJson:
     def test_decimal_is_a_number_with_its_digits(self):
-        assert to_json({"price": Decimal("1.50")}) == '{"price": 1.50}'
-        assert to_json([Decimal("0.3"), Decimal("-2.125")], compact=True) == "[0.3,-2.125]"
+        assert to_json({"price": Decimal("1.50")}) == '{"price":1.50}'
+        assert to_json([Decimal("0.3"), Decimal("-2.125")]) == "[0.3,-2.125]"
 
     def test_nested_decimals(self):
         text = to_json({"rows": [{"n": {"_id": 1, "price": Decimal("9.99")}, "l": [Decimal("1.5"), 2]}]})

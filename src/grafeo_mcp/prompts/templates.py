@@ -210,13 +210,14 @@ def similarity_search(
 
     query_instruction = (
         f"The user is looking for: **{description}**\n"
-        "Generate an embedding for this description using your available embedding "
-        "tools or API, then use it as the query vector."
+        "If you can embed text with the index's model, embed this description and use it "
+        "as the query vector. If not, find a node that matches it (`search_text` or "
+        "`execute_gql`) and search near it with `like_node_id`."
         if description
         else (
-            "Ask the user what they are searching for, or if they can provide an "
-            "embedding vector directly. You need a query vector (list of floats) to "
-            "perform the search."
+            "Ask the user what they are searching for. Search with a query vector if you "
+            "can embed text with the index's model, or start from a node that matches "
+            "(found with `search_text` or `execute_gql`) and pass its ID as `like_node_id`."
         )
     )
 
@@ -230,21 +231,23 @@ def similarity_search(
         "first using `create_vector_index` and populate nodes with embedding vectors "
         "before similarity search is possible.\n"
         "\n"
-        "## Step 2: Obtain a query vector\n"
+        "## Step 2: Choose what to search near\n"
         f"{query_instruction}\n"
-        "The query vector must match the dimensionality of the index (e.g. 1536 for "
-        "OpenAI text-embedding-3-small, 384 for MiniLM).\n"
+        "A query vector must have the index's dimensions and come from the same model "
+        "as the stored vectors (384 for MiniLM).\n"
         "\n"
         "## Step 3: Run the similarity search\n"
-        "Call `vector_search` with the query vector:\n"
+        "Call `vector_search` with the query vector or the starting node:\n"
         f'  vector_search(label="{label or "<LABEL>"}", '
         f'property="{property}", query_vector=[...], k=10)\n'
+        f'  vector_search(label="{label or "<LABEL>"}", '
+        f'property="{property}", like_node_id=<NODE_ID>, k=10)\n'
         "Review the results. Each result includes:\n"
         "- `node_id`: the matching node\n"
         "- `distance`: lower means more similar (the scale depends on the index "
         "metric, e.g. 0 to 2 for cosine)\n"
         "- `labels` and `properties`: the node's labels and stored properties "
-        "(long embedding vectors are left out)\n"
+        "(embeddings show as `<vector: N dims>`)\n"
         "\n"
         "Alternatively, use `vector_graph_search` to combine vector search with "
         "automatic neighborhood expansion: this returns similar nodes AND their "

@@ -89,7 +89,7 @@ async def _ok(client: ClientSession, tool: str, **arguments) -> str:
     result = await client.call_tool(tool, arguments)
     text = _text(result)
     assert result.is_error is False, text
-    assert result.structured_content == {"result": text}
+    assert result.structured_content is None  # the text is the result, sent once
     return text
 
 
@@ -132,9 +132,35 @@ class TestToolListing:
             tools = (await client.list_tools()).tools
         for tool in tools:
             description = tool.description or ""
-            assert len(description) > 80, tool.name
+            assert len(description) > 40, tool.name
             assert "\N{EM DASH}" not in description and "\N{EN DASH}" not in description, tool.name
             assert "auto-normaliz" not in description.lower(), f"{tool.name} still mentions query normalization"
+            assert "Args:" not in description, f"{tool.name}: argument docs belong in the input schema"
+            assert tool.output_schema is None, f"{tool.name}: an output schema makes every result go out twice"
+
+    async def test_listing_stays_within_its_token_budget(self):
+        """Every session pays for the tool listing: keep it near 3,000 tokens (it was about 8,500 in 0.2)."""
+        async with _client() as client:
+            tools = (await client.list_tools()).tools
+        size = sum(
+            len(tool.description or "") + len(json.dumps(tool.input_schema, separators=(",", ":"))) for tool in tools
+        )
+        assert size < 13_000, size
+
+    async def test_input_schemas_are_compact(self):
+        async with _client() as client:
+            tools = (await client.list_tools()).tools
+        for tool in tools:
+            schema = tool.input_schema
+            assert "title" not in schema, tool.name
+            for name, prop in schema.get("properties", {}).items():
+                assert "title" not in prop, (tool.name, name)
+                assert "anyOf" not in prop, (tool.name, name)  # optional arguments are plain types
+        execute_gql = next(tool for tool in tools if tool.name == "execute_gql")
+        assert execute_gql.input_schema["properties"]["params"] == {
+            "description": 'Values for $name in the query: {"name": "Ada"}.',
+            "type": "object",
+        }
 
     async def test_execute_gql_schema_has_params(self):
         async with _client() as client:
@@ -150,6 +176,26 @@ class TestToolListing:
 
 
 class TestToolCalls:
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "expected"),
+        [
+            ("get_node", {"node_id": "abc"}, "Error: get_node: node_id: input should be a valid integer"),
+            ("get_node", {}, "Error: get_node: node_id: field required."),
+            ("create_node", {"labels": "Person"}, "Error: create_node: labels: input should be a valid list"),
+        ],
+    )
+    async def test_argument_errors_use_the_tool_error_format(self, tool, arguments, expected):
+        async with _client() as client:
+            text = await _error(client, tool, **arguments)
+        assert text.startswith(expected), text
+        assert text.endswith("Hint: check the argument names and types in the tool's input schema.")
+        assert "pydantic" not in text and "Arguments" not in text
+
+    async def test_unknown_tool_uses_the_tool_error_format(self):
+        async with _client() as client:
+            text = await _error(client, "graph_overview")
+        assert text.startswith("Error: graph_overview: there is no tool of that name. Hint:")
+
     async def test_crud_round_trip(self):
         async with _client() as client:
             alice = json.loads(await _ok(client, "create_node", labels=["Person"], properties={"name": "Alice"}))
@@ -163,7 +209,7 @@ class TestToolCalls:
             deleted = await _ok(client, "delete_node", node_id=alice["id"])
             assert deleted == f"Deleted node {alice['id']} (:Person) and 1 edge(s)."
             info = json.loads(await _ok(client, "graph_info"))
-            assert (info["info"]["node_count"], info["info"]["edge_count"]) == (1, 0)
+            assert (info["nodes"], info["edges"]) == (1, 0)
 
     async def test_execute_gql_with_params(self):
         async with _client() as client:
@@ -201,7 +247,7 @@ class TestToolCalls:
             await _ok(client, "create_vector_index", label="Doc", property="emb", dimensions=3)
             await _error(client, "vector_search", label="Doc", property="emb", query_vector=[1.0, 0.0], k=3)
             info = json.loads(await _ok(client, "graph_info"))
-            assert info["info"]["node_count"] == 26
+            assert info["nodes"] == 26
             hits = json.loads(
                 await _ok(client, "vector_search", label="Doc", property="emb", query_vector=[1.0, 0.0, 0.0], k=1)
             )
@@ -216,7 +262,7 @@ class TestToolCalls:
             assert "read-only" in text
             await _ok(client, "execute_gql", query="MATCH (n) RETURN count(n) AS c")
             info = json.loads(await _ok(client, "graph_info"))
-            assert info["server"] == {"read_only": True}
+            assert info["database"]["read_only"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -258,3 +304,12 @@ class TestResourcesAndPrompts:
             text = content.text
             assert "indexes.vector" not in text  # label given: no discovery step needed
             assert "`similarity`" not in text
+
+
+async def test_descriptions_have_no_indentation():
+    """Python 3.12 keeps docstring indentation (3.13 strips it): the server cleans it on every version."""
+    async with _client() as client:
+        tools = (await client.list_tools()).tools
+    for tool in tools:
+        for line in (tool.description or "").splitlines():
+            assert not line.startswith("    "), (tool.name, line)

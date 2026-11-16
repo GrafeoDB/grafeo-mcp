@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "grafeo": {
+    "pied-piper": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "./graph.grafeo"
+        "GRAFEO_DB_PATH": "./pied-piper.grafeo"
       }
     }
   }
