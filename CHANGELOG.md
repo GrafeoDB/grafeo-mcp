@@ -2,7 +2,7 @@
 
 All notable changes to grafeo-mcp, an MCP server that gives agents a Grafeo database.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-16
 
 grafeo 0.6 release: runs on grafeo 0.6 and the mcp 2.x SDK, adds time-travel reads, lists its tools in half the bytes, and fixes a server crash, a read-only bypass and query injection. Before upgrading: a grafeo 0.5.x database is migrated to grafeo 0.6's single-file format on the first read-write start (the original is kept as `<path>.pre-0.6`), query results follow grafeo 0.6, and `graph_info` returns a new, smaller shape; see "Upgrading from grafeo-mcp 0.2" in the README. A database that grafeo 0.5 must keep opening stays on grafeo-mcp 0.2 with grafeo pinned below 0.6 (`uvx --from grafeo-mcp==0.2.0 --with "grafeo<0.6" grafeo-mcp`), since 0.2 alone now installs grafeo 0.6.
 
