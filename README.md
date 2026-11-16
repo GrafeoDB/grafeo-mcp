@@ -308,11 +308,12 @@ The `batch_import` tool lets edges reference nodes created in the same batch usi
 ```python
 batch_import(
     nodes=[
-        {"labels": ["Person"], "properties": {"name": "Alice"}},  # @0
-        {"labels": ["Person"], "properties": {"name": "Bob"}},  # @1
+        {"labels": ["Person"], "properties": {"name": "Dinesh Chugtai"}},  # @0
+        {"labels": ["Person"], "properties": {"name": "Bertram Gilfoyle"}},  # @1
     ],
     edges=[
-        {"source_ref": "@0", "target_ref": "@1", "edge_type": "KNOWS"},
+        {"source_ref": "@0", "target_ref": "@1", "edge_type": "RIVAL_OF"},
+        {"source_ref": "@1", "target_ref": "@0", "edge_type": "RIVAL_OF"},  # the rivalry runs both ways
     ],
 )
 ```
@@ -326,7 +327,7 @@ A batch is all or nothing: it is checked completely before anything is written (
 `execute_gql` passes the query text to grafeo's GQL engine unchanged. The engine also accepts common Cypher syntax such as `CREATE`, `MERGE`, `OPTIONAL MATCH` and `DETACH DELETE`, so agents trained on Cypher work out of the box.
 
 - **One statement per call.** Text with several statements separated by `;` is refused before it runs (a trailing `;` is fine). Chain clauses instead (`INSERT ... INSERT ...`, `MATCH ... INSERT ...`) or send separate calls.
-- **Parameters.** Pass values in `params` and reference them as `$name`, e.g. query `MERGE (p:Person {name: $name}) SET p += $props RETURN id(p)` with `params={"name": "Ada", "props": {"born": 1815}}`. A parameter the query uses but `params` lacks is reported by name.
+- **Parameters.** Pass values in `params` and reference them as `$name`, e.g. query `MERGE (p:Person {name: $name}) SET p += $props RETURN id(p)` with `params={"name": "Jared Dunn", "props": {"born_as": "Donald Dunn"}}`. A parameter the query uses but `params` lacks is reported by name.
 - **Write counters.** Results of writing queries include `counters` (nodes, edges, properties and labels created, deleted, set or removed), and engine warnings come back as `warnings`.
 - **Path patterns in WHERE.** GQL tests a path with `EXISTS`: `WHERE p.age > 30 AND EXISTS { (p)-[:WORKS_AT]->(:Company) }`, or the pattern goes into `MATCH`. The Cypher form `WHERE (p)-[:WORKS_AT]->(...)` is a syntax error, and its hint says so.
 - **Deleting edges.** `DELETE` takes variables: `MATCH (b)-[w:WORKS_AT]->(c) DELETE w`. A pattern after `DELETE` is a syntax error whose hint shows this form.
