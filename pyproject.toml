@@ -40,6 +40,19 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/grafeo_mcp"]
 
+# An explicit list: hatch reads the project's .gitignore only, so without it a
+# local build would also pack files that are ignored elsewhere (such as .claude/).
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/grafeo_mcp",
+    "tests",
+    "examples",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+]
+
 # ── Ruff ──────────────────────────────────────────────────────────────
 [tool.ruff]
 target-version = "py312"
@@ -51,6 +64,10 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # ── Ty ────────────────────────────────────────────────────────────────
 [tool.ty.environment]
 python-version = "3.12"
+
+# examples/ run in their own environment (uv run --with "grafeo-datasets[grafeo]"), not the project's.
+[tool.ty.src]
+exclude = ["examples"]
 
 # ── Pytest ────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

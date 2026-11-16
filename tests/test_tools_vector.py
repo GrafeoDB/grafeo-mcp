@@ -51,8 +51,8 @@ class TestNodeSummary:
         vec = [0.1] * 100
         node = db.create_node(["Doc"], {"name": "doc", "embedding": vec})
         summary = _node_summary(db, node.id)
-        # embedding should be stripped (len > 32)
-        assert "embedding" not in summary["properties"]
+        # an embedding (more than 32 numbers) shows as a placeholder, not 100 floats
+        assert summary["properties"]["embedding"] == "<vector: 100 dims>"
         assert summary["properties"]["name"] == "doc"
 
 
@@ -99,14 +99,12 @@ class TestCreateVectorIndex:
         # Create some data first
         ctx.request_context.lifespan_context.db.create_node(["Item"], {"vec": [1.0, 2.0, 3.0]})
         result = create_vector_index("Item", "vec", 3, "cosine", ctx=ctx)
-        assert "index created" in result.lower()
+        assert result == "Vector index created on :Item.vec (3 dimensions, cosine)."
 
     def test_with_params(self, ctx):
         ctx.request_context.lifespan_context.db.create_node(["Item"], {"vec": [1.0, 2.0, 3.0]})
         result = create_vector_index("Item", "vec", 3, "euclidean", m=32, ef_construction=200, ctx=ctx)
-        assert "index created" in result.lower()
-        assert "m=32" in result
-        assert "ef_construction=200" in result
+        assert result == "Vector index created on :Item.vec (3 dimensions, euclidean, m=32, ef_construction=200)."
 
 
 # ---------------------------------------------------------------------------
@@ -246,3 +244,99 @@ class TestVectorGraphExpansion:
         )
         assert result["neighbor_count"] == 0
         assert chain_ctx.request_context.lifespan_context.db.node_count == 4
+
+
+# ---------------------------------------------------------------------------
+# 384-dimension embeddings, as the Silicon Valley demo dataset stores them
+# ---------------------------------------------------------------------------
+
+
+def _unit(i: int, dims: int = 384) -> list[float]:
+    return [1.0 if d == i else 0.01 for d in range(dims)]
+
+
+@pytest.fixture()
+def ai_ctx():
+    db = grafeo.GrafeoDB()
+    fridge = db.create_node(["AI"], {"name": "Jian-Yang's fridge", "talks": True, "embedding": _unit(0)})
+    anton = db.create_node(["AI"], {"name": "Anton", "embedding": [0.9 if d == 0 else 0.1 for d in range(384)]})
+    son = db.create_node(["AI"], {"name": "Son of Anton", "embedding": _unit(5)})
+    owner = db.create_node(["Person"], {"name": "Jian-Yang"})
+    db.create_edge(owner.id, fridge.id, "OWNS")
+    db.create_vector_index("AI", "embedding", 384, "cosine")
+    yield _make_ctx(db), {"fridge": fridge.id, "anton": anton.id, "son": son.id, "owner": owner.id}
+    db.close()
+
+
+class TestEmbeddingsInResults:
+    """A node's embedding costs one short placeholder, not 384 floats, wherever the node appears."""
+
+    def test_get_node_and_neighbors(self, ai_ctx):
+        from grafeo_mcp.tools.graph import get_neighbors, get_node, search_nodes_by_label
+
+        ctx, ids = ai_ctx
+        node = json.loads(get_node(ids["fridge"], ctx=ctx))
+        assert node["properties"]["embedding"] == "<vector: 384 dims>"
+        neighbors = json.loads(get_neighbors(ids["owner"], ctx=ctx))
+        assert neighbors["neighbors"][0]["properties"]["embedding"] == "<vector: 384 dims>"
+        listed = search_nodes_by_label("AI", ctx=ctx)
+        assert len(listed) < 600 and "<vector: 384 dims>" in listed
+
+    def test_query_rows_compact_node_maps_but_not_a_returned_vector(self, ai_ctx):
+        from grafeo_mcp.tools.query import execute_gql
+
+        ctx, _ = ai_ctx
+        whole = json.loads(execute_gql("MATCH (a:AI {name: 'Anton'}) RETURN a", ctx=ctx))
+        assert whole["rows"][0]["a"]["embedding"] == "<vector: 384 dims>"
+        path = json.loads(execute_gql("MATCH p = (:Person)-[:OWNS]->(:AI) RETURN nodes(p) AS ns", ctx=ctx))
+        assert path["rows"][0]["ns"][1]["embedding"] == "<vector: 384 dims>"
+        vector = json.loads(execute_gql("MATCH (a:AI {name: 'Anton'}) RETURN a.embedding AS v", ctx=ctx))
+        assert len(vector["rows"][0]["v"]) == 384
+
+    def test_schema_resource_shows_a_placeholder(self, ai_ctx):
+        from grafeo_mcp.resources.schema import graph_schema
+
+        ctx, _ = ai_ctx
+        schema = graph_schema(ctx)
+        assert ".embedding: <vector: 384 dims>" in schema
+
+
+class TestLikeNodeId:
+    """Agents without an embedding model search near a node they already found."""
+
+    def test_vector_search_near_a_node_leaves_it_out(self, ai_ctx):
+        ctx, ids = ai_ctx
+        hits = json.loads(vector_search("AI", "embedding", like_node_id=ids["fridge"], k=2, ctx=ctx))
+        assert [hit["node_id"] for hit in hits] == [ids["anton"], ids["son"]]
+        assert hits[0]["properties"]["embedding"] == "<vector: 384 dims>"
+
+    def test_mmr_and_vector_graph_search(self, ai_ctx):
+        from grafeo_mcp.tools.vector import mmr_search
+
+        ctx, ids = ai_ctx
+        hits = json.loads(mmr_search("AI", "embedding", like_node_id=ids["fridge"], k=2, ctx=ctx))
+        assert ids["fridge"] not in [hit["node_id"] for hit in hits] and len(hits) == 2
+        graph = json.loads(vector_graph_search("AI", "embedding", like_node_id=ids["fridge"], k=1, ctx=ctx))
+        assert [seed["node_id"] for seed in graph["seeds"]] == [ids["anton"]]
+
+    def test_query_vector_still_works(self, ai_ctx):
+        ctx, ids = ai_ctx
+        hits = json.loads(vector_search("AI", "embedding", query_vector=_unit(0), k=1, ctx=ctx))
+        assert hits[0]["node_id"] == ids["fridge"]
+
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            ({}, "Error: vector_search: nothing to search with. Hint: pass query_vector"),
+            ({"query_vector": [1.0] * 384, "like_node_id": 0}, "pass query_vector or like_node_id, not both"),
+            ({"like_node_id": 999}, "Error: vector_search: node 999 not found."),
+        ],
+    )
+    def test_argument_errors(self, ai_ctx, arguments, message):
+        ctx, _ = ai_ctx
+        assert message in vector_search("AI", "embedding", ctx=ctx, **arguments)
+
+    def test_node_without_a_vector(self, ai_ctx):
+        ctx, ids = ai_ctx
+        result = vector_search("AI", "embedding", like_node_id=ids["owner"], ctx=ctx)
+        assert result.startswith(f"Error: vector_search: node {ids['owner']} has no vector in 'embedding'.")

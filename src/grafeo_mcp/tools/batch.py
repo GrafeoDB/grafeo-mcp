@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from mcp.server.session import ServerSession
+from pydantic import Field
 
 from grafeo_mcp.server import AppContext
 from grafeo_mcp.tools._helpers import (
@@ -124,52 +125,23 @@ def _rollback(db: Any, node_ids: list[int], edge_ids: list[int]) -> str | None:
 
 @grafeo_tool(read_only=False)
 def batch_import(
-    nodes: list[dict[str, Any]],
-    edges: list[dict[str, Any]] | None = None,
+    nodes: Annotated[
+        list[dict[str, Any]],
+        Field(description='Up to 500 objects: {"labels": ["Person"], "properties": {...}}.'),
+    ],
+    edges: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            description='Up to 1000 objects: {"source_ref": "@0", "target_ref": 42, "edge_type": "KNOWS", '
+            '"properties": {...}}. A ref is "@N" (the Nth node of this batch) or an existing node ID.'
+        ),
+    ] = None,
     ctx: Context[AppContext, ServerSession] | None = None,
 ) -> str:
-    """Bulk-create nodes and edges from JSON arrays in a single call.
+    """Create many nodes and edges in one call, all or nothing.
 
-    Use this tool when: you need to import many nodes and edges at once,
-    e.g. loading a dataset, building a graph from structured data, or
-    ingesting extracted entities in bulk.
-    Do NOT use for: creating a single node or edge (use create_node /
-    create_edge), or updating existing data (use update_node / update_edge).
-
-    Nodes are created first, then edges. Edges can reference nodes created
-    in this batch using "@index" notation (e.g. "@0" refers to the first
-    node in the nodes array), or existing nodes by their integer ID.
-
-    All or nothing: the whole batch is checked before anything is written
-    (labels, edge types, "@N" references, and that referenced node IDs
-    exist), and if the engine rejects a node or edge partway (for example a
-    schema constraint), everything this call created is removed again.
-
-    Args:
-        nodes: List of node objects (at most 500), each with:
-            - labels: list of strings (required)
-            - properties: dict of key-value pairs (optional)
-        edges: List of edge objects (at most 1000), each with:
-            - source_ref: int (existing node ID) or str ("@0", "@1", ...)
-              referencing a node by its index in the nodes array
-            - target_ref: int (existing node ID) or str ("@0", "@1", ...)
-            - edge_type: str (required)
-            - properties: dict of key-value pairs (optional)
-
-    Returns:
-        JSON with created_nodes count, created_edges count, and a
-        node_id_map from batch index to actual node ID.
-
-    Examples:
-        batch_import(
-            nodes=[
-                {"labels": ["Person"], "properties": {"name": "Alice"}},
-                {"labels": ["Person"], "properties": {"name": "Bob"}},
-            ],
-            edges=[
-                {"source_ref": "@0", "target_ref": "@1", "edge_type": "KNOWS"},
-            ],
-        )
+    The whole batch is checked before anything is written, and undone if the engine rejects part of it.
+    Returns created_nodes, created_edges and node_id_map (batch index to node ID).
     """
     assert ctx is not None
     if ro := _read_only_guard(ctx, _TOOL):

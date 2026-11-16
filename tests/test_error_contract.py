@@ -105,7 +105,7 @@ CASES: list[tuple[str, Callable[..., str], dict[str, Any], Callable[[], Any]]] =
     ("pagerank", algorithms.pagerank, {"damping": 1.5}, grafeo.GrafeoDB),
     ("pagerank", algorithms.pagerank, {}, _BrokenDB),
     ("dijkstra", algorithms.dijkstra, {"source_id": 0, "target_id": 99}, _db_with_constraint),
-    ("dijkstra", algorithms.dijkstra, {"source_id": 1, "target_id": 0}, _db_with_constraint),
+    ("dijkstra", algorithms.dijkstra, {"source_id": 1, "target_id": 0, "direction": "outgoing"}, _db_with_constraint),
     ("louvain", algorithms.louvain, {"resolution": -1.0}, grafeo.GrafeoDB),
     ("louvain", algorithms.louvain, {}, _BrokenDB),
     ("betweenness_centrality", algorithms.betweenness_centrality, {"top_k": 0}, grafeo.GrafeoDB),
@@ -147,7 +147,7 @@ def test_registered_tools_flag_errors(tool, fn, kwargs, make_db):
     assert result.is_error is True
     text = result.content[0].text
     assert text.startswith(f"Error: {tool}: ")
-    assert result.structured_content == {"result": text}
+    assert result.structured_content is None  # the text is the result, sent once
 
 
 def test_registered_tools_pass_success_through(populated_ctx):
