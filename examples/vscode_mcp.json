@@ -1,9 +1,9 @@
 {
   "servers": {
-    "grafeo": {
+    "pied-piper": {
       "command": "grafeo-mcp",
       "env": {
-        "GRAFEO_DB_PATH": "${workspaceFolder}/graph.grafeo"
+        "GRAFEO_DB_PATH": "${workspaceFolder}/pied-piper.grafeo"
       }
     }
   }
