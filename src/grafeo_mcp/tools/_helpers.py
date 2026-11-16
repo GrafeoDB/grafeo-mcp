@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import re
 import uuid
@@ -178,7 +179,10 @@ def grafeo_tool(
                 return CallToolResult(content=[TextContent(type="text", text=result)], is_error=True)
             return result
 
-        mcp.tool(annotations=annotations, structured_output=False)(mcp_entry)
+        # Python 3.13 strips docstring indentation at compile time, 3.12 does not: clean it here so every
+        # version sends the same description, without four spaces on every line.
+        description = inspect.cleandoc(fn.__doc__ or "")
+        mcp.tool(annotations=annotations, structured_output=False, description=description)(mcp_entry)
         return guarded
 
     return decorator

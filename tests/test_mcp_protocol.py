@@ -304,3 +304,12 @@ class TestResourcesAndPrompts:
             text = content.text
             assert "indexes.vector" not in text  # label given: no discovery step needed
             assert "`similarity`" not in text
+
+
+async def test_descriptions_have_no_indentation():
+    """Python 3.12 keeps docstring indentation (3.13 strips it): the server cleans it on every version."""
+    async with _client() as client:
+        tools = (await client.list_tools()).tools
+    for tool in tools:
+        for line in (tool.description or "").splitlines():
+            assert not line.startswith("    "), (tool.name, line)
